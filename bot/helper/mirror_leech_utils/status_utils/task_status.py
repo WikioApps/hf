@@ -1,4 +1,5 @@
 import time
+import logging
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +32,7 @@ class TaskStatus:
     runner: object = None
 
     def stage(self, phase, total=0):
+        logging.getLogger(__name__).info('Task phase task=%s phase=%s file=%s bytes=%s',self.id,phase,self.name,total)
         self.phase, self.total, self.done = phase, total, 0
         self.phase_start = time.monotonic()
 

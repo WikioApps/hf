@@ -12,7 +12,7 @@ A Telegram bot that downloads files and sends them to your Hugging Face account.
 - Shows WZML-X-style progress, speed, ETA, engine and cancellation commands. Status views contain refresh and pagination controls and disappear when their visible tasks finish.
 - Stores user access, destinations, task records, confirmed uploads, archive manifests and Telegram sessions in MongoDB. Failed transfers retain local files for retry.
 - Provides a responsive website with private transfer history, live activity and owner access controls. Public statistics are optional and contain counts only.
-- Registers Telegram commands automatically. Includes owner-only network speed testing.
+- Registers Telegram commands automatically. Includes owner-only Speedtest.net results with the provider’s share image and detailed server statistics, plus `/logs` for the current application log.
 
 This is a Hugging Face uploader. It does not upload files back to Telegram, download torrents, bypass paid access, or promise support for every file-hosting website.
 
@@ -90,7 +90,8 @@ For MongoDB Atlas, create a database user with read/write access to this applica
 | `/web` | Private, single-use website sign-in link, valid for five minutes. |
 | `/botsettings` | Owner: access, concurrency, limits and website URL. |
 | `/users` | Owner: authorize, block or reset user access. |
-| `/speedtest` | Owner: real download/upload speed and latency, with a five-minute cooldown. |
+| `/speedtest` | Owner: Speedtest.net measurements, result photo when available, and detailed server statistics. Five-minute cooldown after a successful test. |
+| `/logs` or `/log` | Owner, private chat: download the current application log as `logs.txt`. |
 
 Owner controls work only in a private chat. The bot registers the ordinary command menu for everyone and an expanded menu for the owner after their first `/start`. Task IDs are used for cancellation and recovery, not remote folder names.
 
@@ -112,16 +113,19 @@ Use one URL per line for a batch, each with its own options. Reply to a Telegram
 
 Fixed choices use buttons: **model/dataset**, private/public for newly created repositories, **rename/overwrite/skip** for collisions, and **none/extract/zip/7z** processing. The token is verified before saving; its account and organizations become namespace choices. Existing branches are listed, with a separate option to create a branch.
 
+Settings keep a single menu message. Successful text input is deleted and that menu is updated in place. Back and `/cancel` close the pending edit. Reopening the menu removes its previous tracked message; a one-time cleanup also removes recognizable older settings menus/prompts among the preceding 100 message IDs in that private chat. Unrelated messages remain. Deletion depends on Telegram allowing the operation.
+
 Tokens are never shown in settings. Token messages are deleted where Telegram allows it. Send tokens only in the private settings prompt. Private mode affects newly created repositories; it does not change an existing repository's visibility.
 
 Extraction preserves member subfolders. Files with the same name can be renamed, overwritten or skipped according to your settings. Renaming adds ` (1)`, ` (2)` and so on. Simultaneous writes to the same target filename are serialized to prevent local collisions.
 
 ## Archives and download engines
 
-The app is written in Python. aria2 and 7-Zip are native helper executables installed into user-writable directories during the build. This is necessary for broad RAR and archive support; no Docker, apt, sudo or system-wide pip is used.
+The app is written in Python. aria2 and 7-Zip are native helper executables installed into user-writable directories during the build. Native helpers provide accelerated HTTP downloads and broad RAR/7Z support; no Docker, apt, sudo or system-wide pip is used.
 
 - aria2 1.37 is supplied by the pinned Python wheel. Downloads use multiple connections when the source supports range requests.
 - The installer downloads official 7-Zip 26.05, verifies its SHA-256 digest, and installs `tools/7zz`. The build fails if download, checksum or execution fails.
+- Standard ZIP extraction/creation and TAR-family extraction use Python directly, so ordinary ZIP/TAR operations work even if the native helper is missing. AES ZIP and unsupported ZIP compression methods fall back to 7-Zip.
 - ZIP, 7Z, RAR, TAR, TAR.GZ, TAR.BZ2 and TAR.XZ are supported. Other formats readable by the installed 7-Zip may work. Encrypted formats require a supported password scheme.
 - Split archives that need several separately uploaded volumes are not assembled automatically. Unsupported, corrupt or incomplete archives fail with a useful error.
 - Unsafe paths, archive links, duplicate member names, excessive expanded sizes and excessive file counts are rejected.
@@ -139,6 +143,10 @@ The public homepage works on mobile and desktop. Detailed tasks, filenames, dest
 
 Use the exact HTTPS origin in **Website URL**. Browser changes from another origin are rejected. Do not share personal `/web` links; share the plain homepage URL instead.
 
+## Speedtest results
+
+`/speedtest` follows the [WZML-X plugin](https://github.com/SilentDemonSD/WZML-X/tree/wzv3/plugins/speedtest): the Python `speedtest-cli` client measures Speedtest.net download, upload and latency, then requests the provider’s official share image. The caption includes measured transfer sizes, timestamp, server location and sponsor. It uses Speedtest.net services, not an independently generated score or picture. If the provider refuses sharing or Telegram cannot send the photo, the real measured text result remains. Error details go to `/logs`.
+
 ## Storage, recovery and moving hosts
 
 MongoDB is the source of truth. User records, owner settings, task sources, archive manifests, confirmed upload results, the Telegram session and portal sessions are stored there. Large archive manifests and results use separate collections to avoid MongoDB's document-size limit.
@@ -153,7 +161,9 @@ HF tokens, source URLs, archive passwords and Telegram sessions are encrypted be
 
 ## Logs and troubleshooting
 
-Use the pod's deployment and application log views first. If your plan provides SSH or a terminal, these read-only commands match the observed InstaPods service layout:
+Use `/logs` in the owner’s private Telegram chat to download `logs.txt`. It contains real task acceptance, download/extraction/upload phases, confirmed results, worker tracebacks and service events. The current file rotates at 5 MiB; two previous files remain in `hf-data/logs`. Logging begins with this revision and cannot reconstruct earlier failures. Credentials, archive passwords and source URLs are redacted. This command collects application logs, not unrelated host journals.
+
+Use the pod's deployment and application log views for systemd and build output. If your plan provides SSH or a terminal, these read-only commands match the observed InstaPods service layout:
 
 ```sh
 cd /home/instapod/app
@@ -182,7 +192,9 @@ Use the actual platform port if it differs from 8000. Journal access depends on 
 | Portal sign-in rejected | Set Website URL to the exact HTTPS origin and request a fresh `/web` link. |
 | Telegram file cannot be fetched | The bot must have access to its original message; forward it to the bot again if necessary. |
 | Disk limit reached | `/clean` retained tasks, lower concurrency, or increase storage. |
-| Speedtest fails | The provider may block Speedtest.net endpoints. The failure is reported; results are never simulated. |
+| Speedtest fails | Check `/logs` for the provider or connection error. A failed measurement allows another attempt; a successful measurement keeps its text result if photo sharing fails. |
+| `Incomplete Telegram download` in older versions | Update this revision: downloads use a file handle so Telethon cannot silently append a filename extension. A real size mismatch is still rejected. |
+| Archive `FileNotFoundError` in older versions | Ordinary ZIP/TAR now use Python. RAR/7Z and AES ZIP require the build-installed 7-Zip helper; missing executables now produce a specific repair message and a traceback in `/logs`. |
 
 ## Updating
 
@@ -196,7 +208,7 @@ See [docs/architecture.md](docs/architecture.md) for the complete file tree and 
 
 ## Validation and limits
 
-This revision was built in a fresh Python 3.12 virtual environment. Local checks covered syntax/imports, shell and JavaScript syntax, real MongoDB reads/writes and leases, encrypted values, portal authentication and authorization, real aria2 HTTP downloads, and real ZIP/7Z/TAR-family extraction, RAR member extraction and link rejection, concurrent same-user task handling, automatic status deletion, and Uvicorn startup/shutdown on a dynamic port. Lease handover, concurrent acquisition, server-clock expiry, heartbeat renewal during startup, and cancellation while waiting were checked against a real local MongoDB instance. The launcher was also checked from a separate virtual environment with no Uvicorn installed, matching the auto-detected InstaPods command. These checks were run outside the repository.
+This revision was built in a fresh Python 3.12 virtual environment. Local checks covered syntax/imports, shell and JavaScript syntax, real MongoDB reads/writes and leases, encrypted values, portal authentication and authorization, real aria2 HTTP downloads, and real ZIP/7Z/TAR-family extraction, RAR member extraction and link rejection, concurrent same-user task handling, automatic status deletion, and Uvicorn startup/shutdown on a dynamic port. Lease handover, concurrent acquisition, server-clock expiry, heartbeat renewal during startup, and cancellation while waiting were checked against a real local MongoDB instance. The launcher was also checked from a separate virtual environment with no Uvicorn installed, matching the auto-detected InstaPods command. This update also checked Telethon filename normalization, ZIP operations without 7-Zip, a real HTTP download with Content-Disposition followed by extraction, settings-menu replacement, log redaction/access controls, and Speedtest photo/text delivery paths. Telegram/HF/Speedtest delivery was isolated where credentials or provider access were unavailable. These checks were run outside the repository.
 
 Live Telegram authentication, real HF commits, host-specific websites, Speedtest.net and your actual InstaPods deployment require your credentials and network. A successful local build is not a verified production deployment. Archive support depends on the installed engine and the specific archive, and hosting storage/bandwidth limits still apply.
 

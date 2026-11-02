@@ -8,12 +8,13 @@ import uvicorn
 from bot.core.config_manager import Config, ROOT
 from bot.core.runtime import Runtime
 from web.backend.application import create_app
+from bot.helper.ext_utils.log_utils import configure
 
 
 async def serve(config):
     runtime = Runtime(config)
     server = uvicorn.Server(uvicorn.Config(create_app(runtime),host='0.0.0.0',port=config.port,
-                                          log_level='info',access_log=False,timeout_graceful_shutdown=20))
+                                          log_level='info',log_config=None,access_log=False,timeout_graceful_shutdown=20))
     async def monitor():
         await runtime.shutdown_requested.wait()
         server.should_exit = True
@@ -38,6 +39,8 @@ def main():
     except ValueError as error:
         logging.error('%s',error)
         raise SystemExit(2) from None
+    configure(config)
+    logging.info('Starting bot service port=%s data=%s',config.port,config.data)
     asyncio.run(serve(config))
 
 

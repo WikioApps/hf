@@ -1,10 +1,12 @@
 """JSON worker protocol. Secrets arrive over stdin, never command-line arguments."""
 import json
+import logging
 import os
 from pathlib import Path
 import sys
 import time
 from bot.helper.ext_utils.files_utils import filename, check_space
+from bot.helper.ext_utils.log_utils import configure, register_secrets, redact
 
 
 def report(**data):
@@ -60,6 +62,8 @@ def drive(url, output, limit):
 def main():
     mode,*args = sys.argv[1:]
     payload = json.loads(sys.stdin.readline() or '{}')
+    register_secrets(payload.get('token'),payload.get('password'))
+    logging.info('Worker started operation=%s',mode)
     if mode == 'upload':
         from bot.helper.mirror_leech_utils.upload_utils.huggingface_upload import upload
         result = upload(args[0],args[1],payload,report)
@@ -87,20 +91,35 @@ def main():
             result = {'size':os.path.getsize(args[1])}
     elif mode == 'speedtest':
         from speedtest import Speedtest
+        logging.info('Speedtest: retrieving configuration')
         client = Speedtest(secure=True,timeout=15)
-        client.get_best_server(); client.download(threads=2); client.upload(threads=2)
+        logging.info('Speedtest: selecting the best server')
+        client.get_best_server()
+        logging.info('Speedtest: measuring download')
+        client.download(threads=2)
+        logging.info('Speedtest: measuring upload')
+        client.upload(threads=2)
+        try:
+            logging.info('Speedtest: requesting the official result image')
+            client.results.share()
+        except Exception:
+            logging.exception('Speedtest share image unavailable; measured results retained')
         raw = client.results.dict()
-        result = {k:raw[k] for k in ('download','upload','ping')}
-        result['server'] = raw['server'].get('sponsor','')
+        result = {key:raw.get(key) for key in ('download','upload','ping','timestamp','bytes_sent','bytes_received','share')}
+        result['server'] = {key:raw.get('server',{}).get(key) for key in ('name','country','cc','sponsor','latency','lat','lon')}
     else:
         raise ValueError('Unknown worker operation.')
     report(result=result)
 
 if __name__ == '__main__':
+    configure()
     try:
         main()
     except Exception as error:
+        logging.exception('Worker failed')
         status = getattr(getattr(error,'response',None),'status_code',None)
         message = str(error) if type(error) is ValueError and len(str(error)) < 250 and 'http' not in str(error).lower() else type(error).__name__
-        report(error=message+(f' (HTTP {status})' if status else ''))
+        if isinstance(error,FileNotFoundError):
+            message = 'Required local file or executable is missing: '+Path(error.filename or 'unknown').name+'. Check /logs and the build output.'
+        report(error=redact(message)+(f' (HTTP {status})' if status else ''))
         raise SystemExit(1)

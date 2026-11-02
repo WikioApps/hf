@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import sys
 import signal
@@ -28,7 +29,14 @@ async def run_worker(task, mode, arguments, *, secret=None, timeout=None):
     process = await asyncio.create_subprocess_exec(
         sys.executable, '-m', 'bot.helper.ext_utils.worker', mode, *map(str,arguments),
         cwd=ROOT, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL, limit=32*1024**2, start_new_session=True)
+        stderr=asyncio.subprocess.PIPE, limit=32*1024**2, start_new_session=True)
+    async def capture_errors():
+        logger = logging.getLogger('hfbot.worker')
+        while line := await process.stderr.readline():
+            text = line.decode('utf-8',errors='replace').rstrip()[:8192]
+            if text:
+                logger.info('task=%s operation=%s %s',task.id,mode,text)
+    stderr_task = asyncio.create_task(capture_errors())
     async def collect():
         result, error = None, None
         process.stdin.write(json.dumps(secret or {}).encode()+b'\n')
@@ -57,3 +65,4 @@ async def run_worker(task, mode, arguments, *, secret=None, timeout=None):
             return await collect()
     finally:
         await terminate(process)
+        await asyncio.gather(stderr_task,return_exceptions=True)

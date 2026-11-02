@@ -55,7 +55,7 @@ class Runtime:
             raise
         except Exception as error:
             detail = str(error) if type(error) is ValueError else type(error).__name__
-            self.logger.error('Bot startup failed during %s: %s',self.state,detail)
+            self.logger.exception('Bot startup failed during %s: %s',self.state,detail)
             self.ready = False
             self.state = 'failed'
             self.shutdown_requested.set()
@@ -83,7 +83,7 @@ class Runtime:
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            self.logger.error('Instance lease lost: %s',type(error).__name__)
+            self.logger.exception('Instance lease lost: %s',type(error).__name__)
             self.ready = False
             self.state = 'failed'
             self.shutdown_requested.set()
@@ -127,7 +127,7 @@ class Runtime:
         self.logger.info('Bot connected; commands registered; MongoDB ready')
 
     async def register_commands(self):
-        admin = {'botsettings','users','speedtest'}
+        admin = {'botsettings','users','speedtest','logs'}
         commands = [BotCommand(name,info[0]) for name,info in COMMANDS.items() if name not in admin]
         await self.client(SetBotCommandsRequest(BotCommandScopeDefault(),'',commands))
         try:
@@ -161,7 +161,7 @@ class Runtime:
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            self.logger.error('Main worker stopped: %s',type(error).__name__)
+            self.logger.exception('Main worker stopped: %s',type(error).__name__)
             self.ready = False
             self.state = 'failed'
             self.shutdown_requested.set()

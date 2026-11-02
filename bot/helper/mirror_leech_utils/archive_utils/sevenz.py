@@ -5,18 +5,35 @@ import subprocess
 import time
 import tarfile
 import shutil
+import logging
+import zipfile
 from bot.core.config_manager import ROOT
 from bot.helper.ext_utils.files_utils import safe_path, check_space
 
 BINARY = ROOT/'tools/7zz'
+LOGGER = logging.getLogger(__name__)
+
+
+def executable():
+    for candidate in (str(BINARY),shutil.which('7zz'),shutil.which('7z')):
+        if candidate and Path(candidate).is_file() and os.access(candidate,os.X_OK):
+            return candidate
+    raise ValueError('7-Zip is missing. Run sh build.sh --build and redeploy. Standard ZIP/TAR files can still be processed without it.')
 
 
 def entries(path, password='', max_files=10000, max_bytes=80*1024**3):
+    if not Path(path).is_file():
+        raise ValueError('The downloaded archive is missing. Retry the download.')
+    if zipfile.is_zipfile(path):
+        from .zip_utils import entries as zip_entries
+        LOGGER.info('Inspecting ZIP with Python')
+        return zip_entries(path,max_files,max_bytes)
     if tarfile.is_tarfile(path):
         return tar_entries(path,max_files,max_bytes)
-    args = [str(BINARY),'l','-slt','-ba','-sccUTF-8', '-p'+password, '--', str(path)]
+    args = [executable(),'l','-slt','-ba','-sccUTF-8', '-p'+password, '--', str(path)]
     result = subprocess.run(args,capture_output=True,timeout=120)
     if result.returncode:
+        LOGGER.error('7-Zip inspection exit=%s stderr=%s',result.returncode,result.stderr.decode('utf-8',errors='replace')[-4000:])
         raise ValueError('Cannot read archive. Check the password, format and missing volumes.')
     records, total = [], 0
     for block in result.stdout.decode('utf-8',errors='replace').strip().split('\n\n'):
@@ -43,10 +60,17 @@ def entries(path, password='', max_files=10000, max_bytes=80*1024**3):
 
 
 def extract(path, member, output, limit, password, report):
+    if not Path(path).is_file():
+        raise ValueError('The downloaded archive is missing. Retry the download.')
+    if zipfile.is_zipfile(path):
+        from .zip_utils import extract as zip_extract
+        LOGGER.info('Extracting ZIP member with Python: %s',member)
+        if zip_extract(path,member,output,limit,password,report):
+            return
     if tarfile.is_tarfile(path):
         return tar_extract(path,member,output,limit,report)
     # -so writes only the selected member to our own file: archive paths cannot escape.
-    args = [str(BINARY),'x','-so','-spd','-y','-p'+password,'--',str(path),member]
+    args = [executable(),'x','-so','-spd','-y','-p'+password,'--',str(path),member]
     process = subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
     done, last = 0, 0.0
     try:
@@ -73,7 +97,11 @@ def extract(path, member, output, limit, password, report):
 
 
 def compress(source, output, kind, limit, report):
-    args = [str(BINARY),'a','-t'+kind,'-mx=1','-mmt=2','-y',str(output),source.name]
+    if kind == 'zip':
+        from .zip_utils import compress as zip_compress
+        return zip_compress(source,output,limit,report)
+    output.unlink(missing_ok=True)
+    args = [executable(),'a','-t'+kind,'-mx=1','-mmt=2','-y',str(output),source.name]
     process = subprocess.Popen(args,cwd=source.parent,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     try:
         while process.poll() is None:

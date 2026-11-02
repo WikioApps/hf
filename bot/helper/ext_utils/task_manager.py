@@ -7,6 +7,7 @@ import time
 from weakref import WeakValueDictionary
 from urllib.parse import urlparse, quote
 from bot.core.settings import destination
+from bot.helper.ext_utils.log_utils import redact, register_secrets
 from bot.helper.ext_utils.files_utils import filename, safe_path, check_space
 from bot.helper.ext_utils.process_utils import run_worker
 from bot.helper.mirror_leech_utils.status_utils.task_status import TaskStatus, TERMINAL
@@ -66,6 +67,7 @@ class TaskManager:
             raise ValueError('The task limit has been reached. Try again after a transfer finishes.')
         profile = await self.db.user(uid)
         dest = destination(profile)
+        register_secrets(profile.get('token'),options.get('password'))
         processing = options.get('processing',profile['processing'])
         options = {**options,'processing':processing}
         task = TaskStatus(uid,chat,mid,source,dest,options,self.runtime.config.data)
@@ -73,6 +75,7 @@ class TaskManager:
         task.directory.mkdir(parents=True,exist_ok=True)
         task.name = filename(options.get('name') or source.get('name') or 'download.bin')
         await self.save(task)
+        self.runtime.logger.info('Task accepted task=%s user=%s source=%s file=%s',task.id,uid,source['kind'],task.name)
         self.tasks[task.id] = task
         task.runner = asyncio.create_task(self.run(task),name='transfer-'+task.id)
         return task
@@ -133,17 +136,20 @@ class TaskManager:
                 await self.compress(task,mode)
             else:
                 await self.upload(task,task.directory/'source',task.name)
+            self.runtime.logger.info('Task complete task=%s files=%s file=%s',task.id,len(task.results),task.name)
             task.phase = 'Complete'
             await self.save(task)
             await self.runtime.completed(task)
             self.clean_local(task)
         except asyncio.CancelledError:
+            self.runtime.logger.info('Task stopped task=%s phase=%s',task.id,task.phase)
             task.phase = 'Interrupted' if self.closing else 'Cancelled'
             task.error = 'Transfer stopped. Retained files can be retried or cleaned.'
             await self.finish_error(task)
         except Exception as error:
+            self.runtime.logger.exception('Task failed task=%s phase=%s file=%s',task.id,task.phase,task.name)
             task.phase = 'Failed'
-            task.error = str(error) if type(error) is ValueError else type(error).__name__+': transfer failed.'
+            task.error = redact(str(error)) if type(error) is ValueError else type(error).__name__+': transfer failed. Details were saved for /logs.'
             await self.finish_error(task)
         finally:
             self.selection_events.pop(task.id, None)
@@ -178,6 +184,9 @@ class TaskManager:
                     await run_worker(task,'drive',[info['url'],source_file,self.max_file])
                 else:
                     await aria2_download.download(task,info,self.runtime.settings)
+            if not source_file.is_file():
+                raise ValueError('The download engine did not create the expected local file. See /logs for details.')
+            self.runtime.logger.info('Download verified task=%s bytes=%s file=%s',task.id,source_file.stat().st_size,task.name)
             task.downloaded = True
             await self.save(task)
 
@@ -200,6 +209,7 @@ class TaskManager:
             task.engine = 'Hugging Face'
             result = await run_worker(task,'upload',[path,remote],secret={
                 'token':profile['token'],'destination':task.destination})
+            self.runtime.logger.info('HF upload confirmed task=%s path=%s bytes=%s skipped=%s',task.id,result.get('path'),result.get('size'),result.get('skipped',False))
             task.results.append({**result,'source_name':name})
             await self.save(task)
 
@@ -239,7 +249,7 @@ class TaskManager:
             output = task.directory/'member.tmp'
             async with self.extraction:
                 check_space(task.directory,member['size'])
-                task.stage('Extract',member['size']); task.engine = '7-Zip'
+                task.stage('Extract',member['size']); task.engine = 'Archive'
                 await run_worker(task,'extract',[archive,member['original'],output,self.max_file],
                                  secret={'password':task.options.get('password','')})
             await self.upload(task,output,member['name'])

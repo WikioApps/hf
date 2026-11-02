@@ -1,12 +1,9 @@
-import asyncio
 from html import escape
 import re
-import time
 from telethon import Button, errors
-from bot.helper.telegram_helper.bot_commands import COMMANDS, ALIASES, help_text
-from bot.helper.ext_utils.process_utils import run_worker
-from bot.helper.mirror_leech_utils.status_utils.task_status import TaskStatus
-from bot.modules import mirror, users, selection
+from bot.helper.telegram_helper.bot_commands import ALIASES, help_text
+from bot.modules import mirror, users, selection, speedtest
+from bot.modules.logs import send_logs
 
 
 class Router:
@@ -66,9 +63,12 @@ class Router:
             self.owner(event)
             text,buttons = await users.page(self.r)
             return await event.reply(text,buttons=buttons,parse_mode='html')
+        if command == 'logs':
+            self.owner(event)
+            return await send_logs(self.r,event)
         if command == 'speedtest':
             self.owner(event)
-            return await self.speedtest(event)
+            return await speedtest.start(self.r,event)
         await event.reply('Unknown command. Use /help.')
 
     def owner(self,event):
@@ -80,8 +80,8 @@ class Router:
             raise ValueError('Unknown task action.')
         tid = body.strip()
         if command == 'cancel' and not tid:
-            self.r.menus.prompts.pop(event.sender_id,None)
-            return await event.reply('Settings prompt closed. Use /cancel ID to stop a transfer.')
+            if await self.r.menus.cancel(event):return
+            return await event.reply('Use /cancel ID to stop a transfer. Find IDs in /status or /history.')
         if not re.fullmatch('[a-f0-9]{12}',tid): raise ValueError(f'Use /{command} ID. Find task IDs in /status or /history.')
         await getattr(self.r.manager,command)(tid,event.sender_id)
         await event.reply({'cancel':'Transfer stopped.','retry':'Retry started. Use /status.','clean':'Retained local files removed.'}[command])
@@ -107,22 +107,6 @@ class Router:
         await event.reply('Your private sign-in link expires in 5 minutes. Do not share it.',
                           buttons=[[Button.url('Open portal',base+'/#login='+token)]])
 
-    async def speedtest(self,event):
-        now = time.monotonic()
-        if self.r.speedtest_at and now-self.r.speedtest_at < 300: raise ValueError('Wait five minutes between speed tests.')
-        self.r.speedtest_at = now
-        message = await event.reply('Measuring download, upload and latency…')
-        async def measure():
-            try:
-                task = TaskStatus(event.sender_id,event.chat_id,event.id,{}, {}, {},self.r.config.data)
-                result = await run_worker(task,'speedtest',[],timeout=120)
-                await message.edit(f'<b>Network speed</b>\nDownload: {result["download"]/1e6:.2f} Mbps\nUpload: {result["upload"]/1e6:.2f} Mbps\nLatency: {result["ping"]:.1f} ms\nServer: {escape(result["server"])}',parse_mode='html')
-            except asyncio.CancelledError: raise
-            except Exception as error: await self.error(event,error)
-        task = asyncio.create_task(measure())
-        self.r.auxiliary.add(task)
-        task.add_done_callback(self.r.auxiliary.discard)
-
     async def callback(self,event):
         try:
             if not await self.r.db.allowed(event.sender_id): raise ValueError('Access denied.')
@@ -139,7 +123,7 @@ class Router:
 
     async def error(self,event,error,callback=False):
         message = str(error) if type(error) is ValueError else 'The request failed ('+type(error).__name__+'). Check the settings and try again.'
-        self.r.logger.warning('Request failed: %s',type(error).__name__)
+        self.r.logger.exception('Request failed: %s',type(error).__name__)
         if callback:
             await self.r.notify(event.chat_id,escape(message[:500]))
         else:

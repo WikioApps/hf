@@ -39,6 +39,12 @@ Subprocesses run in their own process groups and are terminated on cancellation 
 
 Collections are scoped by bot ID. Metadata and filenames are visible to database administrators; tokens, source URLs, passwords and Telegram sessions are encrypted. Database backups are still necessary. The service does not delete task history automatically.
 
+## Logging and settings messages
+
+Only the parent service writes the rotating application log. Workers write redacted diagnostics to stderr; the parent drains that pipe while reading progress JSON from stdout. `/logs` sends a redacted snapshot to the owner in a private chat. Upload stages and confirmed commits are logged without token or source-URL values.
+
+Settings-menu message IDs are saved in each MongoDB user record. A text prompt edits its existing menu, and a successful input is deleted before that menu is restored. Back/Cancel invalidate the pending edit. Standard ZIP operations live in `zip_utils.py`; 7-Zip remains available for RAR, 7Z and ZIP methods unsupported by Python.
+
 ## Making changes
 
 Add commands in `bot/helper/telegram_helper/bot_commands.py` and implement them in `bot/modules`. Keep preset settings, labels and validation together in `bot/core/settings.py`. Transfer engines should emit real progress through the worker protocol and return confirmed results only after completion. Keep secrets out of logs, command arguments and web responses.
@@ -62,6 +68,7 @@ hf/
 │   │   │   ├── db_handler.py
 │   │   │   ├── files_utils.py
 │   │   │   ├── format_utils.py
+│   │   │   ├── log_utils.py
 │   │   │   ├── network_utils.py
 │   │   │   ├── process_utils.py
 │   │   │   ├── task_manager.py
@@ -69,7 +76,8 @@ hf/
 │   │   ├── mirror_leech_utils/
 │   │   │   ├── archive_utils/
 │   │   │   │   ├── __init__.py
-│   │   │   │   └── sevenz.py
+│   │   │   │   ├── sevenz.py
+│   │   │   │   └── zip_utils.py
 │   │   │   ├── download_utils/
 │   │   │   │   ├── __init__.py
 │   │   │   │   ├── aria2_download.py
@@ -88,9 +96,11 @@ hf/
 │   │   └── __init__.py
 │   ├── modules/
 │   │   ├── __init__.py
+│   │   ├── logs.py
 │   │   ├── mirror.py
 │   │   ├── router.py
 │   │   ├── selection.py
+│   │   ├── speedtest.py
 │   │   ├── status.py
 │   │   ├── users.py
 │   │   └── users_settings.py
