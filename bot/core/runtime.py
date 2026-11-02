@@ -15,6 +15,9 @@ from bot.helper.telegram_helper.bot_commands import COMMANDS
 from bot.modules.status import StatusViews
 from bot.modules.users_settings import SettingsMenu
 
+LEASE_RETRY_SECONDS = 2
+LEASE_RENEW_SECONDS = 10
+
 
 class Runtime:
     def __init__(self, config):
@@ -36,12 +39,66 @@ class Runtime:
         self.offers = {}
         self.speedtest_at = 0
         self.username = ''
+        self.startup_task = None
+        self.lease_monitor = None
+        self.lease_checked = 0
+        self.state = 'starting'
+        self.closed = False
+
+    def launch(self):
+        self.startup_task = asyncio.create_task(self.start_background(), name='bot-startup')
+
+    async def start_background(self):
+        try:
+            await self.start()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            detail = str(error) if type(error) is ValueError else type(error).__name__
+            self.logger.error('Bot startup failed during %s: %s',self.state,detail)
+            self.ready = False
+            self.state = 'failed'
+            self.shutdown_requested.set()
+
+    async def acquire_lease(self):
+        last_notice = 0
+        while not await self.db.lease(self.instance):
+            self.state = 'waiting_for_previous_instance'
+            if not last_notice or time.monotonic()-last_notice >= 30:
+                self.logger.info('Waiting for the previous bot instance lease to expire; retrying automatically.')
+                last_notice = time.monotonic()
+            await asyncio.sleep(LEASE_RETRY_SECONDS)
+        self.lease_checked = time.monotonic()
+        self.lease_monitor = asyncio.create_task(self.maintain_lease(), name='instance-lease')
+        self.state = 'starting_telegram'
+
+    async def maintain_lease(self):
+        try:
+            while True:
+                await asyncio.sleep(LEASE_RENEW_SECONDS)
+                renewed = await asyncio.wait_for(self.db.renew_lease(self.instance),15)
+                if not renewed:
+                    raise ValueError('Instance lease expired or changed owner.')
+                self.lease_checked = time.monotonic()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self.logger.error('Instance lease lost: %s',type(error).__name__)
+            self.ready = False
+            self.state = 'failed'
+            self.shutdown_requested.set()
+            if self.startup_task and not self.startup_task.done():
+                self.startup_task.cancel()
+            await self.manager.close()
+            if self.client:
+                await self.client.disconnect()
 
     async def start(self):
         self.config.data.mkdir(parents=True,exist_ok=True)
         os.chmod(self.config.data,0o700)
+        self.state = 'connecting_database'
         await self.db.connect()
-        await self.db.lease(self.instance)
+        await self.acquire_lease()
         await self.reload_settings()
         await self.db.user(self.config.owner_id)
         record = await self.db.db.telegram.find_one({'_id':self.db.scope}) or {}
@@ -61,7 +118,10 @@ class Runtime:
             'session':self.db.seal(self.client.session.save())},upsert=True)
         await self.register_commands()
         await self.manager.recover()
+        if self.shutdown_requested.is_set():
+            return
         self.ready = True
+        self.state = 'ready'
         self.db_checked = time.monotonic()
         self.monitor = asyncio.create_task(self.supervise())
         self.logger.info('Bot connected; commands registered; MongoDB ready')
@@ -87,7 +147,6 @@ class Runtime:
     async def supervise(self):
         try:
             while True:
-                await self.db.lease(self.instance)
                 await self.reload_settings()
                 self.db_checked = time.monotonic()
                 if not self.client.is_connected():
@@ -104,11 +163,14 @@ class Runtime:
         except Exception as error:
             self.logger.error('Main worker stopped: %s',type(error).__name__)
             self.ready = False
+            self.state = 'failed'
             self.shutdown_requested.set()
 
     def healthy(self):
         return bool(self.ready and self.client and self.client.is_connected()
                     and self.monitor and not self.monitor.done()
+                    and self.lease_monitor and not self.lease_monitor.done()
+                    and time.monotonic()-self.lease_checked < 30
                     and time.monotonic()-self.db_checked < 30)
 
     async def notify(self, chat, text, **kwargs):
@@ -145,14 +207,28 @@ class Runtime:
         await self.notify(task.chat_id,text,buttons=buttons)
 
     async def close(self):
+        if self.closed:
+            return
+        self.closed = True
         self.ready = False
-        if self.monitor:
-            self.monitor.cancel()
-            await asyncio.gather(self.monitor,return_exceptions=True)
+        if self.state != 'failed':
+            self.state = 'stopping'
+        for task in (self.startup_task,self.monitor):
+            if task:
+                task.cancel()
+                await asyncio.gather(task,return_exceptions=True)
         for task in list(self.auxiliary): task.cancel()
         await asyncio.gather(*self.auxiliary,return_exceptions=True)
-        await self.manager.close()
-        if self.client: await self.client.disconnect()
-        try: await self.db.release(self.instance)
-        except Exception: pass
-        await self.db.close()
+        try:
+            await self.manager.close()
+            if self.client:
+                await self.client.disconnect()
+        finally:
+            if self.lease_monitor:
+                self.lease_monitor.cancel()
+                await asyncio.gather(self.lease_monitor,return_exceptions=True)
+            try:
+                await asyncio.wait_for(self.db.release(self.instance),10)
+            except Exception:
+                self.logger.warning('Could not release instance lease; it will expire automatically.')
+            await self.db.close()

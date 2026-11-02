@@ -23,6 +23,7 @@ async def serve(config):
     finally:
         watcher.cancel()
         await asyncio.gather(watcher,return_exceptions=True)
+        await runtime.close()
     if not server.started or runtime.shutdown_requested.is_set():
         raise SystemExit(1)
 

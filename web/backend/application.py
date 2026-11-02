@@ -16,7 +16,7 @@ def create_app(runtime):
     @asynccontextmanager
     async def lifespan(app):
         try:
-            await runtime.start()
+            runtime.launch()
             yield
         finally:
             await runtime.close()
@@ -26,7 +26,7 @@ def create_app(runtime):
 
     async def health(request):
         healthy = runtime.healthy()
-        return JSONResponse({'status':'ready' if healthy else 'unavailable'},status_code=200 if healthy else 503)
+        return JSONResponse({'status':'ready' if healthy else runtime.state},status_code=200 if healthy else 503)
 
     async def identity(request):
         record = await runtime.db.session(request.cookies.get('hf_session',''))
@@ -56,7 +56,7 @@ def create_app(runtime):
         return response
 
     async def public(request):
-        result = {'ready':runtime.healthy(),'bot':runtime.username,'public_access':runtime.settings.get('public_mode',False)}
+        result = {'ready':runtime.healthy(),'status':runtime.state,'bot':runtime.username,'public_access':runtime.settings.get('public_mode',False)}
         if runtime.settings.get('public_status'):
             result['active'] = len(runtime.manager.active())
             result['downloads'] = runtime.manager.downloads.running
@@ -117,7 +117,10 @@ def create_app(runtime):
 
     @app.middleware('http')
     async def security_headers(request,call_next):
-        response = await call_next(request)
+        if request.url.path.startswith('/api/') and request.url.path != '/api/public' and not runtime.healthy():
+            response = JSONResponse({'error':'Bot is not ready yet. Please wait.','status':runtime.state},503)
+        else:
+            response = await call_next(request)
         response.headers.update({'X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer',
             'X-Frame-Options':'DENY','Cache-Control':'no-store',
             'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"})

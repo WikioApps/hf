@@ -7,6 +7,8 @@ from cryptography.fernet import Fernet
 from pymongo import AsyncMongoClient, ReturnDocument
 from bot.core.settings import USER_DEFAULTS, BOT_DEFAULTS
 
+LEASE_SECONDS = 60
+
 
 def utcnow():
     return datetime.now(timezone.utc)
@@ -127,14 +129,25 @@ class Database:
 
     async def lease(self, instance):
         from pymongo.errors import DuplicateKeyError
-        query = {'_id':self.scope, '$or':[{'instance':instance},{'expires':{'$lt':utcnow()}}]}
+        # Initialize without an expression: MongoDB forbids $expr in an upsert filter.
         try:
-            record = await self.db.leases.find_one_and_update(query, {'$set':{
-                'instance':instance, 'expires':utcnow()+timedelta(seconds=60)}},
-                upsert=True, return_document=ReturnDocument.AFTER)
+            await self.db.leases.update_one({'_id':self.scope}, {'$setOnInsert':{
+                'instance':'', 'expires':datetime(1970,1,1,tzinfo=timezone.utc)}}, upsert=True)
         except DuplicateKeyError:
-            raise ValueError('Another instance of this bot is running. Stop it, then wait 60 seconds.') from None
-        return bool(record)
+            pass
+        query = {'_id':self.scope, '$or':[{'instance':instance},
+                 {'$expr':{'$lte':['$expires','$$NOW']}}]}
+        record = await self.db.leases.find_one_and_update(query, [{'$set':{
+            'instance':instance, 'expires':{'$add':['$$NOW',LEASE_SECONDS*1000]}}}],
+            return_document=ReturnDocument.AFTER)
+        return record is not None
+
+    async def renew_lease(self, instance):
+        query = {'_id':self.scope,'instance':instance,
+                 '$expr':{'$gt':['$expires','$$NOW']}}
+        result = await self.db.leases.update_one(query, [{'$set':{
+            'expires':{'$add':['$$NOW',LEASE_SECONDS*1000]}}}])
+        return result.matched_count == 1
 
     async def release(self, instance):
         await self.db.leases.delete_one({'_id':self.scope,'instance':instance})

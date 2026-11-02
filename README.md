@@ -133,7 +133,7 @@ Download and upload counts are separate. Queueing begins only when a configured 
 
 ## Website and health checks
 
-Uvicorn listens on `0.0.0.0:$PORT`, default `8000`. Configure an HTTP health check at **`/healthz`** if your panel supports it. It returns 200 only while Telegram is connected, MongoDB was recently checked and the supervisor is alive. It returns 503 when the application is not ready. A failed supervisor shuts the application down with a nonzero exit status.
+Uvicorn listens on `0.0.0.0:$PORT`, default `8000`. Configure an HTTP health check at **`/healthz`** if your panel supports it. If it offers a startup grace period, allow at least 120 seconds for lease expiry and Telegram connection; readiness must remain 503 until initialization finishes. It returns 200 only while Telegram is connected, MongoDB was recently checked and the supervisor is alive. It returns 503 when the application is not ready, including `waiting_for_previous_instance` during a lease handover. The HTTP server and public page start immediately while bot initialization runs in the background. Protected APIs remain unavailable until the bot is ready. A failed supervisor shuts the application down with a nonzero exit status.
 
 The public homepage works on mobile and desktop. Detailed tasks, filenames, destinations and user controls require a Telegram-issued sign-in link. Links are consumed once, removed from the browser address bar, and exchanged for a secure HttpOnly cookie lasting 24 hours. Public statistics, when enabled, expose only aggregate counts. User settings stay in Telegram; the website provides transfer controls and owner access/concurrency controls.
 
@@ -147,7 +147,7 @@ Downloaded bytes live in a sibling directory named `hf-data`: on the observed In
 
 After a restart, unfinished records become **Interrupted**. `/retry` uses retained files where present, otherwise downloads the original source again. Confirmed archive uploads are skipped. A host failure immediately after a remote commit but before its MongoDB record is saved can produce a duplicate on retry under the rename policy.
 
-To move hosts, stop the old instance, point the new host at the same database, and keep the same Telegram bot identity and `API_HASH`. A MongoDB lease prevents two instances using the same bot; after an abrupt stop, it can take 60 seconds to expire. Transfer queues are not automatically replayed after migration; use `/history` and `/retry`.
+To move hosts, stop the old instance, point the new host at the same database, and keep the same Telegram bot identity and `API_HASH`. A MongoDB lease prevents two instances using the same bot; after an abrupt stop, it can take 60 seconds to expire. The new process waits and retries automatically instead of crashing. It does not start Telegram or recover tasks until it owns the lease. If another live host keeps renewing the lease, the new host continues waiting; stop the old host to complete the handover. Lease timestamps use MongoDB’s clock, and a separate heartbeat keeps the lease alive during Telegram startup and normal operation. Transfer queues are not automatically replayed after migration; use `/history` and `/retry`.
 
 HF tokens, source URLs, archive passwords and Telegram sessions are encrypted before storage. The encryption key is derived from the Telegram API hash and bot ID. **Back up the database and preserve that API hash.** Changing it requires migrating or resetting encrypted records. Rotating the bot token for the same bot does not change the encryption key. Filenames and transfer metadata are not encrypted.
 
@@ -174,7 +174,7 @@ Use the actual platform port if it differs from 8000. Journal access depends on 
 | PEP 668 / externally managed environment | Use the documented virtual-environment commands, never system-wide `pip install`. |
 | Missing variables | Add all five required variables, save, then restart. The startup error names missing variables without printing their values. |
 | MongoDB timeout | URI, database password, Atlas network rules and outbound connectivity. |
-| Another instance is running | Stop the old bot instance and wait 60 seconds for its lease to expire. |
+| Waiting for previous instance | A reboot can leave a lease valid for up to 60 seconds. Startup waits automatically. If waiting persists, stop any old pod still running this bot; do not delete a live instance’s lease. |
 | `aria2c` or `7zz` missing | Run the build step and inspect its download/checksum output. Do not skip a failed build. |
 | Missing `.venv` or `app.py` | Use the repository root as working directory and the exact Start command. |
 | HF 401 / 403 | Set a valid write token in your own `/usettings`; confirm access to the selected organization/repository. |
@@ -196,7 +196,7 @@ See [docs/architecture.md](docs/architecture.md) for the complete file tree and 
 
 ## Validation and limits
 
-This revision was built in a fresh Python 3.12 virtual environment. Local checks covered syntax/imports, shell and JavaScript syntax, real MongoDB reads/writes and leases, encrypted values, portal authentication and authorization, real aria2 HTTP downloads, and real ZIP/7Z/TAR-family extraction, RAR member extraction and link rejection, concurrent same-user task handling, automatic status deletion, and Uvicorn startup/shutdown on a dynamic port. The launcher was also checked from a separate virtual environment with no Uvicorn installed, matching the auto-detected InstaPods command. These checks were run outside the repository.
+This revision was built in a fresh Python 3.12 virtual environment. Local checks covered syntax/imports, shell and JavaScript syntax, real MongoDB reads/writes and leases, encrypted values, portal authentication and authorization, real aria2 HTTP downloads, and real ZIP/7Z/TAR-family extraction, RAR member extraction and link rejection, concurrent same-user task handling, automatic status deletion, and Uvicorn startup/shutdown on a dynamic port. Lease handover, concurrent acquisition, server-clock expiry, heartbeat renewal during startup, and cancellation while waiting were checked against a real local MongoDB instance. The launcher was also checked from a separate virtual environment with no Uvicorn installed, matching the auto-detected InstaPods command. These checks were run outside the repository.
 
 Live Telegram authentication, real HF commits, host-specific websites, Speedtest.net and your actual InstaPods deployment require your credentials and network. A successful local build is not a verified production deployment. Archive support depends on the installed engine and the specific archive, and hosting storage/bandwidth limits still apply.
 

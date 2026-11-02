@@ -30,8 +30,9 @@ function renderAdmin(data) {
 }
 async function refresh() {
   if(busy || document.hidden) return; busy=true;
-  try { const publicData=await api('/api/public'); $('health').textContent=publicData.ready?'Online':'Reconnecting'; if(publicData.bot) $('telegram').href='https://t.me/'+publicData.bot;
+  try { const publicData=await api('/api/public'); $('health').textContent=publicData.ready?'Online':publicData.status==='waiting_for_previous_instance'?'Waiting for previous instance':'Starting'; if(publicData.bot) $('telegram').href='https://t.me/'+publicData.bot;
     if(publicData.active!==undefined) $('public-stats').textContent=`${publicData.active} active · ${publicData.downloads} downloading · ${publicData.uploads} uploading`;
+    if(!publicData.ready){$('portal').hidden=true;$('guest').hidden=false;$('logout').hidden=true;return;}
     const response=await fetch('/api/me?offset='+offset,{credentials:'same-origin'}); if(response.status===401){$('guest').hidden=false;$('portal').hidden=true;$('logout').hidden=true;return;} if(!response.ok)throw new Error('Could not load your transfers.'); const data=await response.json();
     $('portal').hidden=false;$('guest').hidden=true;$('logout').hidden=false;$('welcome').textContent=`${data.user.owner?'OWNER':'YOUR PORTAL'} · ${data.user.name}`;
     const dest=data.destination; $('destination').textContent=dest.namespace&&dest.repo_name ? `${dest.namespace}/${dest.repo_name} · ${dest.repo_type} · ${dest.branch} · /${dest.path}` : 'Choose a destination in /usettings before your first upload.';
