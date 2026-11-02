@@ -1,0 +1,66 @@
+"""One aria2 process per task; real progress comes from its private local RPC."""
+import asyncio
+import secrets
+import shutil
+import socket
+import time
+import httpx
+from bot.helper.ext_utils.process_utils import terminate
+from bot.helper.ext_utils.files_utils import check_space
+
+async def download(task, info, settings):
+    binary = shutil.which('aria2c')
+    if not binary:
+        raise ValueError('aria2c is missing. Run the build step to install requirements.')
+    check_space(task.directory, info.get('total',0))
+    limit = settings['max_file_gb'] * 1024**3
+    if info.get('total',0) > limit:
+        raise ValueError('The file exceeds the configured size limit.')
+    sock = socket.socket()
+    sock.bind(('127.0.0.1',0))
+    port = sock.getsockname()[1]
+    sock.close()
+    secret = secrets.token_hex(24)
+    args = [binary, '--enable-rpc=true', '--rpc-listen-all=false', f'--rpc-listen-port={port}',
+            f'--rpc-secret={secret}', '--max-connection-per-server=8', '--split=8',
+            '--min-split-size=8M', '--continue=true', '--file-allocation=none',
+            '--check-certificate=true', '--allow-overwrite=true', '--auto-file-renaming=false',
+            '--max-tries=5', '--retry-wait=3', '--timeout=60', '--connect-timeout=20',
+            '--console-log-level=error', '--summary-interval=0', '--max-concurrent-downloads=1']
+    process = await asyncio.create_subprocess_exec(*args,stdout=asyncio.subprocess.DEVNULL,stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
+    async with httpx.AsyncClient(trust_env=False,timeout=10) as client:
+        async def rpc(method, *params):
+            response = await client.post(f'http://127.0.0.1:{port}/jsonrpc',json={
+                'jsonrpc':'2.0','id':'task','method':'aria2.'+method,'params':['token:'+secret,*params]})
+            data = response.json()
+            if 'error' in data:
+                raise ValueError('aria2 rejected the download request.')
+            return data['result']
+        try:
+            for attempt in range(50):
+                if process.returncode is not None:
+                    raise ValueError('aria2 could not start its local RPC service.')
+                try:
+                    await rpc('getVersion')
+                    break
+                except httpx.TransportError:
+                    await asyncio.sleep(.1)
+            options = {'dir':str(task.directory),'out':'source','header':[
+                f'{k}: {v}' for k,v in info.get('headers',{}).items() if '\n' not in str(v)]}
+            gid = await rpc('addUri',[info['url']],options)
+            task.engine = 'aria2 1.37'
+            task.stage('Download',info.get('total',0))
+            while True:
+                data = await rpc('tellStatus',gid)
+                task.done = int(data.get('completedLength',0))
+                task.total = int(data.get('totalLength',0))
+                if max(task.done,task.total) > limit:
+                    raise ValueError('Download exceeds the configured file size.')
+                check_space(task.directory)
+                if data['status'] == 'complete':
+                    return task.directory/'source'
+                if data['status'] in ('error','removed'):
+                    raise ValueError('aria2 download failed (code '+str(data.get('errorCode','unknown'))+'). Check the link or retry.')
+                await asyncio.sleep(.75)
+        finally:
+            await terminate(process)

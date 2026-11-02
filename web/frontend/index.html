@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>HF Uploader</title><link rel="stylesheet" href="/assets/style.css"><script src="/assets/app.js" defer></script></head>
+<body><header><a class="brand" href="/">HF<span>Uploader</span></a><div class="header-actions"><span id="health" class="badge">Connecting</span><button id="logout" hidden>Sign out</button></div></header>
+<main><section class="intro"><p class="eyebrow">TELEGRAM → HUGGING FACE</p><h1>Your files.<br>Your destination.</h1><p>Follow transfers, find completed uploads, and manage access in one place.</p><a id="telegram" class="button primary" href="https://t.me/">Open Telegram bot</a></section>
+<div id="notice" role="status" hidden></div><section id="guest" class="card"><h2>Open your portal</h2><p>Send <code>/web</code> to the bot in a private chat. Your one-time link signs you in securely.</p><p class="muted">Your Hugging Face credentials and transfer history are private.</p></section>
+<section id="portal" hidden><div class="section-heading"><div><p class="eyebrow" id="welcome"></p><h2>Transfer activity</h2></div><button id="refresh">Refresh</button></div><div id="summary" class="summary"></div><div id="active" class="task-grid"></div>
+<section class="card"><h2>Your destination</h2><p id="destination"></p><p class="muted">Change your Hugging Face token, repository, branch and folder in <code>/usettings</code>.</p></section>
+<section class="card"><h2>Recent transfers</h2><div id="history"></div></section>
+<section id="admin" hidden class="card"><p class="eyebrow">OWNER CONTROLS</p><h2>Access &amp; capacity</h2><div id="settings" class="settings-grid"></div><h3>Users</h3><div id="users"></div><div class="pagination"><button id="previous-users">Previous</button><button id="next-users">Next</button></div><p class="muted">Additional limits and the website URL are available in <code>/botsettings</code>.</p></section></section>
+</main><footer><span>HF Uploader</span><span id="public-stats">Transfers stay in your account.</span></footer></body></html>
