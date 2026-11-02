@@ -1,5 +1,24 @@
 # Hugging Face Mirror for Telegram
 
+> **InstaPods deployment commands — keep Build and Start separate**
+>
+> - **Install:** `python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt`
+> - **Build:** `sh build.sh --build` (installs/checks, then exits)
+> - **Start:** `sh start.sh` (runs `app.py` continuously)
+> - **Release:** empty. **Port:** `8000`.
+>
+> If the deployment log says `Using custom start command: sh build.sh` and ends with
+> `Ran ... tests`, `OK`, and `Deactivated successfully`, the build was accidentally
+> selected as the service. Open **Git → Settings**, set **Start** to `sh start.sh`,
+> save and click **Deploy Now**. Do not set a test/build command as Start.
+>
+> For existing pods with that saved mistake, `build.sh` now detects when it is
+> actually running inside the documented `app.service` (cgroup or unit MainPID)
+> and immediately executes `start.sh`. It does not reinstall or run tests in that
+> path. `--build` always forces a finite build. This compatibility path cannot
+> rewrite the pod's saved dashboard settings; explicitly correcting Start is
+> preferred. If service ownership cannot be confirmed, it remains a finite build.
+
 A Python Telegram bot that downloads Telegram media or supported web links and uploads them **only to Hugging Face**. Built for the InstaPods Python preset, without Docker, root access, aria2, FFmpeg, rclone, or a local Telegram Bot API server.
 
 Live status messages follow the WZML-X/mirror-leech presentation: filename, task owner, progress bar, processed/total bytes, speed, ETA/estimated total/elapsed time, phase, engine, input/output modes, cancel command, CPU, RAM, free disk and uptime. There are paginated views, user filtering, phase filtering and an aggregate task overview.
@@ -48,13 +67,15 @@ hf/
 ├── worker.py             # Isolated HF upload, extraction and resolver workers
 ├── config.py             # Environment validation and safe paths
 ├── requirements.txt      # Pinned Python dependencies
-├── build.sh              # Virtualenv install, syntax checks and tests
+├── build.sh              # Explicit finite build; legacy app.service handoff
+├── deployment.py         # Detect actual app.service ownership
 ├── start.sh              # Exec the actual app using .venv
 ├── .env.example          # Placeholders only
 ├── .gitignore
 ├── README.md
 └── tests/
-    └── test_app.py        # Behavioral and local integration tests
+    ├── test_app.py        # Behavioral and local integration tests
+    └── test_deployment.py # Launcher/service regression tests
 ```
 
 At runtime, `DATA_DIR` contains the Telegram session, `instance.lock`, and `tasks/<task-id>/manifest.json` plus temporary or retained files. It must be writable and private. The program does not expose these files over HTTP.
@@ -81,7 +102,7 @@ python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt
 **Build** (independently usable; it also performs installation):
 
 ```sh
-sh build.sh
+sh build.sh --build
 ```
 
 **Start**:
@@ -205,6 +226,7 @@ Journal visibility depends on your pod's permissions; use dashboard logs if deni
 
 | Symptom | Action |
 | --- | --- |
+| `Ran ... tests`, `OK`, service inactive | AI detection chose Build as Start. In Git → Settings use Build `sh build.sh --build` and Start `sh start.sh`, save, then Deploy Now. |
 | PEP 668 / externally-managed-environment | Use the exact install/build commands; never system-wide pip. |
 | `app.py` missing / wrong start filename | Repository root must be selected. Start with `sh start.sh`. |
 | Missing environment variables | Fill all six required variables in Env; save. Check `--check-config`. The program also explicitly reads `.env`. |
@@ -226,9 +248,9 @@ Journal visibility depends on your pod's permissions; use dashboard logs if deni
 
 Pushes to the tracked `main` branch auto-deploy when enabled. Avoid updating during important transfers; restart recovery is explicit. Use the Git tab to inspect the new deployment and rollback source code if needed. A rollback doesn't undo HF commits or restore deleted local data.
 
-For local validation, run `sh build.sh`. It creates/uses `.venv`, installs pinned dependencies, compiles application files and runs unit/local integration tests. Tests use temporary directories and local fixture servers; they do not contact Telegram or upload to Hugging Face. Real network-service credentials are never required for the build.
+For local validation, run `sh build.sh --build`. It creates/uses `.venv`, installs pinned dependencies, compiles application files and runs unit/local integration tests. Tests use temporary directories and local fixture servers; they do not contact Telegram or upload to Hugging Face. Real network-service credentials are never required for the build.
 
-**19 automated tests passed.** Validation performed during preparation: Python 3.12 clean virtualenv install, dependency consistency, syntax/import checks, shell syntax, missing/invalid environment checks, real local HTTP transfer/redirect tests, archive extraction, traversal rejection, state/retention/retry behavior, worker cancellation, status rendering, transport-progress hook behavior and health-state responses. The HF transport tests substitute the remote API while exercising the real pinned file-stream hook.
+**27 automated tests passed.** Validation performed during preparation: Python 3.12 clean virtualenv install, dependency consistency, syntax/import checks, shell syntax, missing/invalid environment checks, real local HTTP transfer/redirect tests, archive extraction, traversal rejection, state/retention/retry behavior, worker cancellation, status rendering, transport-progress hook behavior and health-state responses. Launcher regression tests also verify that the legacy service command hands off to a live process, preserves the service PID with `exec`, receives SIGTERM, and leaves explicit builds finite. Service ownership is tested with cgroup/MainPID fixtures; the production pod itself is not accessible from this workspace. The HF transport tests substitute the remote API while exercising the real pinned file-stream hook.
 
 **Not verified here:** a live Telegram login/download, an authenticated HF commit, individual third-party host availability, or a deployment on your InstaPods account. Complete the small-file smoke test described above with your credentials. No “100% deployment success” claim is made without that evidence.
 
