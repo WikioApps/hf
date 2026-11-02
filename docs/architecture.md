@@ -93,6 +93,7 @@ hf/
 │   │   └── users_settings.py
 │   └── __init__.py
 ├── docs/
+│   └── architecture.md
 ├── scripts/
 │   ├── install_tools.py
 │   └── service_detection.py
