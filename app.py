@@ -1,43 +1,36 @@
-"""Run the Telegram bot and HTTP portal in one supervised process."""
-import asyncio
-import logging
+"""Select the project virtual environment before importing application packages."""
 import os
 from pathlib import Path
 import sys
-import uvicorn
-from bot.core.config_manager import Config, ROOT
-from bot.core.runtime import Runtime
-from web.backend.application import create_app
+
+ROOT = Path(__file__).resolve().parent
 
 
-async def serve(config):
-    runtime = Runtime(config)
-    server = uvicorn.Server(uvicorn.Config(create_app(runtime),host='0.0.0.0',port=config.port,
-                                          log_level='info',access_log=False,timeout_graceful_shutdown=20))
-    async def monitor():
-        await runtime.shutdown_requested.wait()
-        server.should_exit = True
-    watcher = asyncio.create_task(monitor())
-    try:
-        await server.serve()
-    finally:
-        watcher.cancel()
-        await asyncio.gather(watcher,return_exceptions=True)
-    if not server.started or runtime.shutdown_requested.is_set():
-        raise SystemExit(1)
+def prepare_environment():
+    environment = ROOT / '.venv'
+    python = environment / 'bin' / 'python'
+    if not (environment / 'pyvenv.cfg').is_file() or not os.access(python, os.X_OK):
+        raise SystemExit('Project virtual environment is missing. Run: sh build.sh --build')
+
+    os.environ['PATH'] = str(environment / 'bin') + os.pathsep + str(ROOT / 'tools') + os.pathsep + os.environ.get('PATH', '')
+    os.environ['VIRTUAL_ENV'] = str(environment)
+    os.environ['PYTHONUNBUFFERED'] = '1'
+    os.environ.pop('PYTHONHOME', None)
+    if Path(sys.prefix).resolve() == environment.resolve():
+        os.environ.pop('_HF_RUNTIME_REEXEC', None)
+        return
+
+    if os.environ.get('_HF_RUNTIME_REEXEC') == str(environment):
+        raise SystemExit('Project Python did not activate .venv. Rebuild with: sh build.sh --build')
+    os.environ['_HF_RUNTIME_REEXEC'] = str(environment)
+    print('Switching to the project Python environment (.venv).', file=sys.stderr, flush=True)
+    os.execve(str(python), [str(python), str(ROOT / 'app.py'), *sys.argv[1:]], os.environ.copy())
 
 
 def main():
-    logging.basicConfig(level=logging.INFO,format='%(asctime)s %(levelname)s %(name)s %(message)s')
-    for name in ('httpx','httpcore','telethon'):
-        logging.getLogger(name).setLevel(logging.WARNING)
-    os.environ['PATH'] = str(Path(sys.executable).parent)+os.pathsep+str(ROOT/'tools')+os.pathsep+os.environ.get('PATH','')
-    try:
-        config = Config.load()
-    except ValueError as error:
-        logging.error('%s',error)
-        raise SystemExit(2) from None
-    asyncio.run(serve(config))
+    prepare_environment()
+    from bot.core.application import main as run_application
+    run_application()
 
 
 if __name__ == '__main__':

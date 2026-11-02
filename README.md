@@ -53,6 +53,8 @@ sh start.sh
 
 Start runs the actual bot and Uvicorn in the foreground. It does not install packages or run tests. The script exports `.venv/bin` and `tools` in `PATH` and uses `exec` so the service manager can stop the application cleanly.
 
+If InstaPods detects `source ~/app/venv/bin/activate && python app.py`, the Python entry point switches to the project’s `.venv` before importing Uvicorn or other dependencies. Packages installed in `.venv` are therefore available even when the platform activates a different `venv`. No packages are installed during startup.
+
 **Do not save `sh build.sh --build` as the Start command.** Earlier deployments selected `sh build.sh` and exited after building. A compatibility check now redirects bare `sh build.sh` to the launcher only when it is actually running inside `app.service`; explicit settings above remain the recommended configuration.
 
 ## Environment variables
@@ -168,6 +170,7 @@ Use the actual platform port if it differs from 8000. Journal access depends on 
 | Symptom | What to check |
 | --- | --- |
 | Service exits after a build or “Ran … tests” | Set Start to `sh start.sh`, Build to `sh build.sh --build`. No test suite is included in this version. |
+| `ModuleNotFoundError: uvicorn` after a successful build | Check whether the log installs into `.venv` but starts `venv`. Deploy the latest launcher, which selects `.venv` automatically, or set Start to `sh start.sh`. |
 | PEP 668 / externally managed environment | Use the documented virtual-environment commands, never system-wide `pip install`. |
 | Missing variables | Add all five required variables, save, then restart. The startup error names missing variables without printing their values. |
 | MongoDB timeout | URI, database password, Atlas network rules and outbound connectivity. |
@@ -193,7 +196,7 @@ See [docs/architecture.md](docs/architecture.md) for the complete file tree and 
 
 ## Validation and limits
 
-This revision was built in a fresh Python 3.12 virtual environment. Local checks covered syntax/imports, shell and JavaScript syntax, real MongoDB reads/writes and leases, encrypted values, portal authentication and authorization, real aria2 HTTP downloads, and real ZIP/7Z/TAR-family extraction, RAR member extraction and link rejection, concurrent same-user task handling, automatic status deletion, and Uvicorn startup/shutdown on a dynamic port. These checks were run outside the repository.
+This revision was built in a fresh Python 3.12 virtual environment. Local checks covered syntax/imports, shell and JavaScript syntax, real MongoDB reads/writes and leases, encrypted values, portal authentication and authorization, real aria2 HTTP downloads, and real ZIP/7Z/TAR-family extraction, RAR member extraction and link rejection, concurrent same-user task handling, automatic status deletion, and Uvicorn startup/shutdown on a dynamic port. The launcher was also checked from a separate virtual environment with no Uvicorn installed, matching the auto-detected InstaPods command. These checks were run outside the repository.
 
 Live Telegram authentication, real HF commits, host-specific websites, Speedtest.net and your actual InstaPods deployment require your credentials and network. A successful local build is not a verified production deployment. Archive support depends on the installed engine and the specific archive, and hosting storage/bandwidth limits still apply.
 

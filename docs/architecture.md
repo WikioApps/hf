@@ -1,5 +1,7 @@
 # Source guide
 
+The root `app.py` uses only the Python standard library to select the project’s `.venv`, then loads `bot/core/application.py`. This also handles hosts that activate a different `venv` before running `python app.py`. Re-execution uses `exec` to preserve the service process ID.
+
 The application has one service process. Uvicorn starts the Telegram client and MongoDB connection through the application lifespan. A supervisor renews the single-instance lease, persists active phases and refreshes Telegram status messages. Failure of that supervisor makes health checks fail and stops the service.
 
 ## Responsibilities
@@ -50,6 +52,7 @@ hf/
 ├── bot/
 │   ├── core/
 │   │   ├── __init__.py
+│   │   ├── application.py
 │   │   ├── config_manager.py
 │   │   ├── runtime.py
 │   │   └── settings.py

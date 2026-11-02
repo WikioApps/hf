@@ -15,4 +15,4 @@ python3 -m venv .venv
 export PATH="$PWD/.venv/bin:$PWD/tools:$PATH"
 .venv/bin/python scripts/install_tools.py
 .venv/bin/python -m compileall -q app.py bot web/backend scripts
-.venv/bin/python -c 'import app; from bot.modules import router; print("Build complete. Start with: sh start.sh")'
+.venv/bin/python -c 'import app; from bot.core import application; from bot.modules import router; print("Build complete. Start with: sh start.sh")'
