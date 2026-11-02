@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.session*
+data/
+downloads/
+*.log
+*.zip
+.pytest_cache/
