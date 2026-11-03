@@ -19,6 +19,8 @@ def styled(button, style):
         if style not in ('primary','success','danger'):
             raise ValueError('Invalid Telegram button style.')
         button.style = KeyboardButtonStyle(**{'bg_'+style:True})
+    else:
+        button.style = None
     return button
 
 

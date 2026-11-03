@@ -24,9 +24,9 @@ function renderActive(tasks) {
     $('active').append(card);
   }
 }
-function renderHistory(records) {
+function renderHistory(records,owner=false) {
   $('history').replaceChildren();
-  if(records.length) $('history').append(button('Clear finished history',()=>action({action:'clear_history'}),'danger'));
+  if(records.length) $('history').append(button(owner?'Clear finished history (all users)':'Clear finished history',()=>action({action:'clear_history'}),'danger'));
   if(!records.length) $('history').append(node('p','Your completed and interrupted transfers will appear here.','muted'));
   for(const t of records) { const row=node('div',undefined,'history-row'), main=node('div',undefined,'row-main'), controls=node('div',undefined,'row-actions'); main.append(node('strong',t.name),node('small',`${t.phase} · ${new Date(t.created*1000).toLocaleString()}`)); if(t.error) main.append(node('small',t.error)); for(const url of t.links) controls.append(link(url,'Open file')); if(['Failed','Cancelled','Interrupted'].includes(t.phase)) { controls.append(button('Retry',()=>action({action:'retry',id:t.id})),button('Clean files',()=>action({action:'clean',id:t.id}))); } row.append(main,controls); $('history').append(row); }
 }
@@ -49,7 +49,7 @@ async function refresh() {
     $('portal').hidden=false;$('guest').hidden=true;$('logout').hidden=false;$('welcome').textContent=`${data.user.owner?'OWNER':'YOUR PORTAL'} · ${data.user.name}`;
     const dest=data.destination; $('destination').textContent=dest.namespace&&dest.repo_name ? `${dest.namespace}/${dest.repo_name} · ${dest.repo_type} · ${dest.branch} · /${dest.path}` : 'Choose a destination in /usettings before your first upload.';
     $('summary').replaceChildren(); for(const [value,label] of [[data.active.length,'Active'],[data.active.filter(t=>(t.groups||[t]).some(g=>g.phase==='Download')).length,'Downloading'],[data.active.filter(t=>(t.groups||[t]).some(g=>['Upload','Commit'].includes(g.phase))).length,'Uploading']]) { const box=node('div',undefined,'metric');box.append(node('strong',value),node('span',label));$('summary').append(box); }
-    renderActive(data.active);renderHistory(data.history);renderAdmin(data);
+    renderActive(data.active);renderHistory(data.history,data.user.owner);renderAdmin(data);
   } catch(e){notice(e.message);} finally{busy=false;}
 }
 async function init(){const params=new URLSearchParams(location.hash.slice(1));const token=params.get('login');if(token){history.replaceState(null,'',location.pathname);try{await api('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});}catch(e){notice(e.message);}}await refresh();setInterval(refresh,5000);}
