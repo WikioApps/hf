@@ -39,7 +39,7 @@ ARCHIVE_URL = "https://github.com/WikioApps/hf/archive/refs/heads/main.zip"
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR / "hf_project"
 BUILD_MARKER = PROJECT_DIR / ".wispbyte-build.sha256"
-DEFAULT_PORT = 16780
+DEFAULT_PORT = 8080
 STATUS = "Preparing HF Uploader"
 ACTIVE_CHILD: subprocess.Popen | None = None
 
