@@ -6,6 +6,7 @@ from datetime import datetime, timezone, timedelta
 from cryptography.fernet import Fernet
 from pymongo import AsyncMongoClient, ReturnDocument
 from bot.core.settings import USER_DEFAULTS, BOT_DEFAULTS
+from bot.helper.mirror_leech_utils.status_utils.task_status import TERMINAL
 
 LEASE_SECONDS = 60
 
@@ -36,6 +37,7 @@ class Database:
         await self.db.uploads.create_index([('bot',1),('task',1),('index',1)])
         await self.db.manifests.create_index([('bot',1),('task',1),('offset',1)])
         await self.db.tasks.create_index([('bot', 1), ('user_id', 1), ('created', -1)])
+        await self.db.tasks.create_index([('bot',1),('phase',1),('updated',1)])
         await self.db.users.create_index([('bot', 1), ('user_id', 1)], unique=True)
         await self.db.settings.update_one({'_id': self.scope}, {'$setOnInsert': BOT_DEFAULTS}, upsert=True)
 
@@ -89,12 +91,21 @@ class Database:
         data['result_count'],data['member_count'] = len(results),len(members)
         await self.db.tasks.replace_one({'_id':tid},data,upsert=True)
 
+    async def delete_records(self, ids):
+        scoped = {'bot':self.scope,'task':{'$in':ids}}
+        await self.db.uploads.delete_many(scoped)
+        await self.db.manifests.delete_many(scoped)
+        result = await self.db.tasks.delete_many({'bot':self.scope,'_id':{'$in':ids},
+                                                 'phase':{'$in':list(TERMINAL)}})
+        self.manifests_written.difference_update(ids)
+        return result.deleted_count
+
     async def results(self, tid, limit=10000):
         return await self.db.uploads.find({'bot':self.scope,'task':tid},
                 {'_id':0,'bot':0,'task':0,'index':0}).sort('index',1).limit(limit).to_list()
 
     async def tasks(self, uid=None, limit=50):
-        query = {'bot':self.scope}
+        query = {'bot':self.scope,'phase':{'$in':list(TERMINAL)}}
         if uid is not None:
             query['user_id'] = uid
         records = await self.db.tasks.find(query).sort('created',-1).limit(limit).to_list()

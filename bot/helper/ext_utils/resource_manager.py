@@ -8,6 +8,7 @@ import psutil
 
 MIB = 1024**2
 GIB = 1024**3
+STREAM_WINDOW = 32*MIB
 
 
 def memory_available():
@@ -23,17 +24,24 @@ def memory_available():
     return available
 
 
+def allocated(path):
+    try:
+        stat = Path(path).stat()
+        return min(stat.st_size, getattr(stat,'st_blocks',(stat.st_size+511)//512)*512)
+    except OSError:
+        return 0
+
+
 class Reservation:
-    def __init__(self, path, size):
-        self.path, self.size = Path(path), size
+    def __init__(self, path, size, dynamic=False):
+        self.path, self.size, self.dynamic = Path(path), size, dynamic
 
     @property
     def remaining(self):
-        try:
-            written = self.path.stat().st_size
-        except OSError:
-            written = 0
-        return max(0,self.size-written)
+        # Sparse aria2 files can have their final length before the blocks exist.
+        if self.dynamic:
+            return min(STREAM_WINDOW,max(0,self.size-allocated(self.path)))
+        return max(0,self.size-allocated(self.path))
 
 
 class ResourceManager:
@@ -49,16 +57,27 @@ class ResourceManager:
         return self.settings().get('disk_reserve_mb',1024)*MIB
 
     @property
+    def reserved(self):
+        return sum(item.remaining for item in self.reservations)
+
+    @property
+    def available(self):
+        return shutil.disk_usage(self.directory).free-self.reserve-self.reserved
+
+    @property
     def free(self):
-        return max(0,shutil.disk_usage(self.directory).free-self.reserve-
-                   sum(item.remaining for item in self.reservations))
+        return max(0,self.available)
+
+    def check(self, lease):
+        if lease in self.reservations and self.available < 0:
+            raise ValueError('Download stopped before disk space ran out. Other transfers have reserved the remaining space. Retry after they finish.')
 
     async def pause(self, task, reason):
         task.wait_reason = reason
         if task.phase != 'Wait':
             task.stage('Wait')
         try:
-            await asyncio.wait_for(self.condition.wait(),2)
+            await asyncio.wait_for(self.condition.wait(),1)
         except asyncio.TimeoutError:
             pass
 
@@ -68,21 +87,17 @@ class ResourceManager:
             raise ValueError('The file exceeds the configured size limit.')
         if expected > shutil.disk_usage(self.directory).total-self.reserve:
             raise ValueError('This file cannot fit on the host with the configured disk reserve.')
+        dynamic = not (known or expected)
+        lease = Reservation(path,limit if dynamic else expected,dynamic)
         start = time.monotonic()
         async with self.condition:
-            while True:
-                existing = Path(path).stat().st_size if Path(path).is_file() else 0
-                # Unknown-length streams receive a fixed budget; they cannot consume other jobs’ reservations.
-                budget = expected if expected or known else min(limit,max(0,self.free+existing))
-                needed = max(0,budget-existing)
-                if (known or expected or budget >= min(limit,64*MIB)) and needed <= self.free and memory_available() >= 96*MIB:
-                    lease = Reservation(path,budget)
-                    self.reservations.add(lease)
-                    task.wait_reason = ''
-                    return lease
+            while lease.remaining > self.free or memory_available() < 96*MIB:
                 if time.monotonic()-start > 900:
-                    raise ValueError('Storage or memory stayed unavailable for 15 minutes. Clean retained files or lower concurrency, then retry.')
-                await self.pause(task,'Waiting for disk space or memory; uploads continue.')
+                    raise ValueError('Storage or memory stayed unavailable for 15 minutes. Wait for active transfers or increase host capacity.')
+                await self.pause(task,'Waiting for available disk or RAM; active uploads continue.')
+            self.reservations.add(lease)
+            task.wait_reason = ''
+            return lease
 
     async def release(self, lease):
         async with self.condition:

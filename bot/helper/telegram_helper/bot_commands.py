@@ -38,17 +38,17 @@ Task type stays visible: Upload, Extract → Upload, ZIP → Upload or 7Z → Up
 
 Refresh updates the view; arrows appear only when needed. The status message is removed when its visible transfers finish.'''),
     'cancel': ('Stop a transfer', '''/cancel ID
-Use the /cancel_ID link on a status card. Stops only that task and its child processes. Confirmed HF uploads remain; unuploaded local files stay for retry.
+Use the /cancel_ID link on a status card. Stops only that task and its child processes. Confirmed HF uploads remain. Local download/extraction files are deleted after the workers stop; retry downloads the source again.
 
 /cancel without an ID closes your current settings prompt.'''),
     'retry': ('Retry a failed or interrupted task', '''/retry ID
-Find the ID in the failure message or /history. Reuses complete local files and skips saved upload results. Public collections are resolved again so expired links can refresh.
+Find the ID in the failure message or /history. Reuses complete local files before their cleanup deadline and skips saved upload results. Failed files expire after 15 minutes by default; cancelled files are removed immediately. Public collections are resolved again so expired links can refresh.
 
 Moving hosts preserves settings/history in MongoDB. Local bytes require persistent storage; otherwise the source must still be available for a new download.'''),
-    'history': ('Recent transfers and results', 'Shows your latest ten tasks, completed file links and Retry/Clean buttons. The owner can view all users’ history. A partial failure preserves already confirmed uploads.'),
+    'history': ('Recent transfers and results', 'Open privately to see your latest ten finished tasks, file links and Retry/Clean buttons. Clear finished history removes all your finished records and retained local files; the owner clears all users. Active transfers and HF uploads remain. History expires after seven days by default.'),
     'select': ('Choose archive members', '/select ID\nReopens selection for a single archive submitted with -e -s. Choose files, then confirm to start extraction. Selection expires after one hour.'),
     'clean': ('Remove retained local files', '/clean ID\nDeletes retained download/extraction files for a finished, failed or cancelled task. Cancel running tasks first. Hugging Face files and MongoDB history are preserved.'),
-    'stats': ('CPU, memory, disk and transfer slots', 'Shows current CPU, memory, free disk, uptime and occupied download/upload slots. Set concurrency and disk reserve through the owner’s /botsettings. Unknown-length downloads receive a fixed disk budget.'),
+    'stats': ('CPU, memory, disk and transfer slots', 'Shows current CPU, memory, free disk, uptime and occupied download/upload slots. Set concurrency and disk reserve through the owner’s /botsettings. Unknown-length downloads use a small rolling reservation instead of claiming the whole disk. Available space subtracts the safety reserve and unwritten bytes promised to other tasks.'),
     'sites': ('Supported public links', 'Public file hosts, folders, video sites, galleries and playlists. Use /sites for the current list and documented limitations. No browser-cookie upload is required.'),
     'speedtest': ('Owner: measure network speed', 'Owner only, private chat. Runs a real Speedtest.net download/upload/latency measurement. Sends the official share image when available, otherwise the measured text result. One test at a time; five-minute cooldown after success. Provider failures are saved in /logs.'),
     'logs': ('Owner: download real bot logs', 'Owner only, private chat. /logs sends logs.txt with transfer phases, worker errors and service events. Tokens and source URLs are redacted. Unrelated host/system journals are not included.'),
@@ -59,6 +59,8 @@ Allow everyone — public access; off by default
 Concurrent downloads/uploads — global slot limits, shared by tasks
 Files prepared per task — bounds extraction/collection overlap
 Keep disk free — space the bot reserves for the service
+Keep failed files — 0, 15 or 60 minutes (default 15)
+Keep transfer history — 1, 7 or 30 days (default 7)
 Collection/archive/file limits — bound expansion and task size
 Website URL/public statistics — portal origin and optional public counts
 

@@ -1,6 +1,7 @@
 from html import escape
 import re
-from telethon import Button, errors
+from telethon import errors
+from bot.helper.telegram_helper.button import Button
 from bot.helper.telegram_helper.bot_commands import ALIASES, help_text, sites_text
 from bot.modules import mirror, users, selection, speedtest
 from bot.modules.logs import send_logs
@@ -87,7 +88,9 @@ class Router:
         await getattr(self.r.manager,command)(tid,event.sender_id)
         await event.reply({'cancel':'Transfer stopped.','retry':'Retry started. Use /status.','clean':'Retained local files removed.'}[command])
 
-    async def history(self,event):
+    async def history(self,event,edit=False):
+        if not event.is_private:
+            raise ValueError('Open /history in a private chat with the bot.')
         uid = None if event.sender_id == self.r.config.owner_id else event.sender_id
         records = await self.r.db.tasks(uid,10)
         text = '<b>Recent transfers</b>\n'
@@ -97,8 +100,22 @@ class Router:
             if task.get('results'):
                 text += '<a href="'+escape(task['results'][-1]['url'],quote=True)+'">Open file</a>\n'
             if task['phase'] in ('Failed','Interrupted','Cancelled'):
-                buttons.append([Button.inline('Retry '+task['_id'],f'act:retry:{task["_id"]}'),Button.inline('Clean',f'act:clean:{task["_id"]}')])
-        await event.reply(text if records else 'No transfers yet.',buttons=buttons,parse_mode='html',link_preview=False)
+                buttons.append([Button.inline('Retry '+task['_id'],f'act:retry:{task["_id"]}'),
+                                Button.inline('Clean files',f'act:clean:{task["_id"]}')])
+        if records:
+            label = 'Clear finished history (all users)' if uid is None else 'Clear finished history'
+            buttons.append([Button.inline(label,f'hist:{event.sender_id}:clear')])
+            text += '\nClearing removes finished records and local files. Active transfers and HF uploads are kept.'
+        respond = event.edit if edit else event.reply
+        await respond(text if records else 'No recent transfers.',buttons=buttons,parse_mode='html',link_preview=False)
+
+    async def history_action(self,event,parts):
+        if len(parts) != 3 or int(parts[1]) != event.sender_id or not event.is_private:
+            raise ValueError('Open your own /history menu privately.')
+        if parts[2] != 'clear':
+            raise ValueError('Unknown history action.')
+        await self.r.manager.clear_history(event.sender_id)
+        await self.history(event,edit=True)
 
     async def web(self,event):
         if not event.is_private: raise ValueError('Use /web in a private chat to get your sign-in link.')
@@ -114,6 +131,7 @@ class Router:
             parts = event.data.decode().split(':')
             await event.answer()
             if parts[0] == 'help': await event.edit(help_text(parts[1]),parse_mode='html',buttons=[[Button.inline('All commands','help:all')]] if parts[1]!='all' else None)
+            elif parts[0] == 'hist': await self.history_action(event,parts)
             elif parts[0] == 'cfg': await self.r.menus.callback(event,parts)
             elif parts[0] == 'st': await self.r.status.callback(event,parts)
             elif parts[0] == 'usr': await users.callback(self.r,event,parts)

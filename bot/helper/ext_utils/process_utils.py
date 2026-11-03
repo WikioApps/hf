@@ -51,7 +51,16 @@ async def _run_worker(task, mode, arguments, *, secret=None, timeout=None, memor
     resource_error=[]
     async def monitor_memory():
         while process.returncode is None:
-            await asyncio.sleep(.5)
+            await asyncio.sleep(.25)
+            manager = getattr(task,'resource_manager',None)
+            lease = getattr(task,'storage_lease',None)
+            if manager and lease:
+                try:
+                    manager.check(lease)
+                except ValueError as error:
+                    resource_error.append(str(error))
+                    await terminate(process)
+                    return
             try:
                 parent=psutil.Process(process.pid)
                 usage=sum(p.memory_info().rss for p in [parent,*parent.children(recursive=True)] if p.is_running())
@@ -63,7 +72,9 @@ async def _run_worker(task, mode, arguments, *, secret=None, timeout=None, memor
     memory_task=asyncio.create_task(monitor_memory())
     async def collect():
         result, error = None, None
-        process.stdin.write(json.dumps({**(secret or {}),'_memory_limit_bytes':cap}).encode()+b'\n')
+        manager = getattr(task,'resource_manager',None)
+        process.stdin.write(json.dumps({**(secret or {}),'_memory_limit_bytes':cap,
+            '_disk_reserve_bytes':manager.reserve if manager else 512*1024**2}).encode()+b'\n')
         await process.stdin.drain()
         process.stdin.close()
         while line := await process.stdout.readline():

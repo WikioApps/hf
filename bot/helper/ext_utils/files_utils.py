@@ -28,6 +28,10 @@ def filename(value):
     return value
 
 
-def check_space(directory, required=0):
-    if shutil.disk_usage(directory).free < 512 * 1024**2 + max(0, required):
-        raise ValueError('Insufficient free disk space. Clean retained files or increase pod storage.')
+DISK_RESERVE = 512 * 1024**2
+
+
+def check_space(directory, required=0, reserve=None):
+    floor = DISK_RESERVE if reserve is None else reserve
+    if shutil.disk_usage(directory).free < floor + max(0, required):
+        raise ValueError('The storage reserve would be exceeded. Wait for active uploads or increase host storage.')

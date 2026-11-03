@@ -28,21 +28,22 @@ def public_url_sync(url):
     return url
 
 
-def guard_worker_requests():
+def guard_worker_requests(*, media=True):
     """Validate extractor requests and redirects without loading browser credentials."""
     import requests
     import urllib.request
-    from yt_dlp.networking.common import RequestDirector
     original_send=requests.Session.send
     def send(self,request,**kwargs):
         public_url_sync(request.url)
         return original_send(self,request,**kwargs)
     requests.Session.send=send
-    director_send=RequestDirector.send
-    def media_send(self,request):
-        public_url_sync(request.url)
-        return director_send(self,request)
-    RequestDirector.send=media_send
+    if media:
+        from yt_dlp.networking.common import RequestDirector
+        director_send=RequestDirector.send
+        def media_send(self,request):
+            public_url_sync(request.url)
+            return director_send(self,request)
+        RequestDirector.send=media_send
     redirect=urllib.request.HTTPRedirectHandler.redirect_request
     def redirect_request(self,request,fp,code,msg,headers,newurl):
         public_url_sync(newurl)

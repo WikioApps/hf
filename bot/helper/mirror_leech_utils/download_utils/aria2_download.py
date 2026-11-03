@@ -8,12 +8,14 @@ import time
 import httpx
 from bot.helper.ext_utils.process_utils import terminate
 from bot.helper.ext_utils.files_utils import check_space
+from bot.helper.ext_utils.resource_manager import allocated
 
 async def download(task, info, settings):
     binary = shutil.which('aria2c')
     if not binary:
         raise ValueError('aria2c is missing. Run the build step to install requirements.')
-    check_space(task.directory, info.get('total',0))
+    reserve = settings.get('disk_reserve_mb',1024)*1024**2
+    check_space(task.directory,max(0,info.get('total',0)-allocated(task.directory/'source')),reserve=reserve)
     limit = settings.get('byte_limit',settings['max_file_gb'] * 1024**3)
     if info.get('total',0) > limit:
         raise ValueError('The file exceeds the configured size limit.')
@@ -57,7 +59,10 @@ async def download(task, info, settings):
                 task.total = int(data.get('totalLength',0))
                 if max(task.done,task.total) > limit:
                     raise ValueError('Download exceeds the configured file size.')
-                check_space(task.directory)
+                check_space(task.directory,reserve=reserve)
+                manager = getattr(task,'resource_manager',None)
+                lease = getattr(task,'storage_lease',None)
+                if manager and lease: manager.check(lease)
                 if data['status'] == 'complete':
                     target = task.directory/'source'
                     if not target.is_file():
@@ -69,6 +74,6 @@ async def download(task, info, settings):
                     return target
                 if data['status'] in ('error','removed'):
                     raise ValueError('aria2 download failed (code '+str(data.get('errorCode','unknown'))+'). Check the link or retry.')
-                await asyncio.sleep(.75)
+                await asyncio.sleep(.25)
         finally:
             await terminate(process)
