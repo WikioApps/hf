@@ -14,7 +14,32 @@ A Telegram bot that downloads files and sends them to your Hugging Face account.
 - Provides a responsive website with private transfer history, live activity and owner access controls. Public statistics are optional and contain counts only.
 - Registers Telegram commands automatically. Includes owner-only Speedtest.net results with the provider’s share image and detailed server statistics, plus `/logs` for the current application log.
 
+The optional Dockerfile packages the same service for container hosting such as Orkestr.
+
 This is a Hugging Face uploader. It does not upload files back to Telegram, download torrents, bypass paid access, or promise support for every file-hosting website.
+
+## Deploy with Docker on Orkestr
+
+Use this repository as the build context, branch **main**, with `Dockerfile` at the repository root. The image uses Python 3.12, installs the download/archive helpers during the build, and runs the bot and website as an unprivileged user. It does not require systemd inside the container.
+
+- Set the five required environment variables listed below: `API_ID`, `API_HASH`, `BOT_TOKEN`, `OWNER_ID`, and `DATABASE_URL`.
+- Route HTTP traffic to container port **8000**, or set `PORT` to match the port configured in the dashboard.
+- Keep the image's default start command. If an override is required, use `sh start.sh`.
+- Use `/healthz` for readiness, allowing at least 120 seconds for startup and lease handover. A 503 means the bot is not ready; opening the website alone does not establish readiness.
+- Run **one replica** for each bot token. Stop the old deployment before moving hosts.
+- If persistent volumes are available, mount one at `/opt/hf/hf-data`, writable by UID/GID **10001**. MongoDB retains settings and sessions, but download files and local logs need this volume to survive container replacement.
+- Set the new HTTPS origin in Telegram **/botsettings → Website URL**, then use `/web` to sign in.
+
+The Orkestr console is reachable, but its authenticated deployment controls have not been verified here. Use these values in the corresponding container, environment, port and storage settings available in your account. No platform-specific configuration file is required by this repository.
+
+To build the same image locally:
+
+```sh
+docker build -t hf-uploader .
+docker run --rm --env-file .env -p 8000:8000 -v hf-data:/opt/hf/hf-data hf-uploader
+```
+
+The `.env` file in that local command must contain your credentials and remain untracked. On a hosted deployment, enter credentials in the dashboard instead. The Dockerfile copies only application sources; `.dockerignore` also excludes local credentials and generated data.
 
 ## Deploy on InstaPods
 
@@ -51,9 +76,9 @@ This command is independently usable: it creates the virtual environment, instal
 sh start.sh
 ```
 
-Start runs the actual bot and Uvicorn in the foreground. It does not install packages or run tests. The script exports `.venv/bin` and `tools` in `PATH` and uses `exec` so the service manager can stop the application cleanly.
+Start runs the actual bot and Uvicorn in the foreground. It does not install packages or run tests. The launcher checks `.venv`, `venv`, and the active virtual environment, then uses one with a supported Python version, the pinned dependencies and working application imports. It exports that environment’s `bin` directory and `tools` in `PATH` and uses `exec` so the service manager can stop the application cleanly.
 
-If InstaPods detects `source ~/app/venv/bin/activate && python app.py`, the Python entry point switches to the project’s `.venv` before importing Uvicorn or other dependencies. Packages installed in `.venv` are therefore available even when the platform activates a different `venv`. No packages are installed during startup.
+Both observed InstaPods layouts are supported: an explicit build installing into `.venv`, and an auto-detected install using `venv` without a build stage. If InstaPods starts `source ~/app/venv/bin/activate && python app.py`, the launcher uses that environment when it contains the required packages. It can switch to `.venv` when that is the complete environment, or skip an incomplete `.venv` and use `venv`. No packages are installed during startup. Keep the explicit build command to install the 7-Zip helper needed for RAR, 7Z and AES ZIP; ordinary ZIP/TAR processing uses Python.
 
 **Do not save `sh build.sh --build` as the Start command.** Earlier deployments selected `sh build.sh` and exited after building. A compatibility check now redirects bare `sh build.sh` to the launcher only when it is actually running inside `app.service`; explicit settings above remain the recommended configuration.
 
@@ -180,13 +205,14 @@ Use the actual platform port if it differs from 8000. Journal access depends on 
 | Symptom | What to check |
 | --- | --- |
 | Service exits after a build or “Ran … tests” | Set Start to `sh start.sh`, Build to `sh build.sh --build`. No test suite is included in this version. |
-| `ModuleNotFoundError: uvicorn` after a successful build | Check whether the log installs into `.venv` but starts `venv`. Deploy the latest launcher, which selects `.venv` automatically, or set Start to `sh start.sh`. |
+| `ModuleNotFoundError: uvicorn` after a successful install | Deploy the latest launcher: it checks dependencies in both `.venv` and `venv` and selects a complete environment. |
+| `Project virtual environment is missing` in an older revision | Update the repository. A valid host-managed `venv` is now accepted even when `.venv` was never created. |
 | PEP 668 / externally managed environment | Use the documented virtual-environment commands, never system-wide `pip install`. |
 | Missing variables | Add all five required variables, save, then restart. The startup error names missing variables without printing their values. |
 | MongoDB timeout | URI, database password, Atlas network rules and outbound connectivity. |
 | Waiting for previous instance | A reboot can leave a lease valid for up to 60 seconds. Startup waits automatically. If waiting persists, stop any old pod still running this bot; do not delete a live instance’s lease. |
 | `aria2c` or `7zz` missing | Run the build step and inspect its download/checksum output. Do not skip a failed build. |
-| Missing `.venv` or `app.py` | Use the repository root as working directory and the exact Start command. |
+| `No compatible virtual environment` | The message identifies missing or mismatched packages. Run `sh build.sh --build`, then start with `sh start.sh`. |
 | HF 401 / 403 | Set a valid write token in your own `/usettings`; confirm access to the selected organization/repository. |
 | Empty user destination after upgrade | Configure `/usettings` again. The previous environment-based HF settings are not imported. |
 | Portal sign-in rejected | Set Website URL to the exact HTTPS origin and request a fresh `/web` link. |
@@ -208,9 +234,11 @@ See [docs/architecture.md](docs/architecture.md) for the complete file tree and 
 
 ## Validation and limits
 
-This revision was built in a fresh Python 3.12 virtual environment. Local checks covered syntax/imports, shell and JavaScript syntax, real MongoDB reads/writes and leases, encrypted values, portal authentication and authorization, real aria2 HTTP downloads, and real ZIP/7Z/TAR-family extraction, RAR member extraction and link rejection, concurrent same-user task handling, automatic status deletion, and Uvicorn startup/shutdown on a dynamic port. Lease handover, concurrent acquisition, server-clock expiry, heartbeat renewal during startup, and cancellation while waiting were checked against a real local MongoDB instance. The launcher was also checked from a separate virtual environment with no Uvicorn installed, matching the auto-detected InstaPods command. This update also checked Telethon filename normalization, ZIP operations without 7-Zip, a real HTTP download with Content-Disposition followed by extraction, settings-menu replacement, log redaction/access controls, and Speedtest photo/text delivery paths. Telegram/HF/Speedtest delivery was isolated where credentials or provider access were unavailable. These checks were run outside the repository.
+This revision was built in a fresh Python 3.12 virtual environment. Local checks covered syntax/imports, shell and JavaScript syntax, real MongoDB reads/writes and leases, encrypted values, portal authentication and authorization, real aria2 HTTP downloads, and real ZIP/7Z/TAR-family extraction, RAR member extraction and link rejection, concurrent same-user task handling, automatic status deletion, and Uvicorn startup/shutdown on a dynamic port. Lease handover, concurrent acquisition, server-clock expiry, heartbeat renewal during startup, and cancellation while waiting were checked against a real local MongoDB instance. Launcher checks cover `.venv` only, `venv` only, incomplete `.venv` with a complete `venv`, the platform activating the wrong environment, and a supported active environment outside the checkout. These include actual startup from the auto-detected activation command without a build-created `.venv`. This update also checked Telethon filename normalization, ZIP operations without 7-Zip, a real HTTP download with Content-Disposition followed by extraction, settings-menu replacement, log redaction/access controls, and Speedtest photo/text delivery paths. Telegram/HF/Speedtest delivery was isolated where credentials or provider access were unavailable. These checks were run outside the repository.
 
-Live Telegram authentication, real HF commits, host-specific websites, Speedtest.net and your actual InstaPods deployment require your credentials and network. A successful local build is not a verified production deployment. Archive support depends on the installed engine and the specific archive, and hosting storage/bandwidth limits still apply.
+The Python 3.12 container build was also checked locally, including native helper execution, UID/GID 10001, writable data storage, dynamic HTTP port, missing-configuration errors, readiness before initialization, and SIGTERM shutdown. The local build used a temporary certificate mount for this workspace’s network proxy; no proxy certificate is stored in the shipped Dockerfile or image.
+
+Live Telegram authentication, real HF commits, host-specific websites, Speedtest.net and your actual InstaPods or Orkestr deployment require your credentials and network. A successful local build is not a verified production deployment. Archive support depends on the installed engine and the specific archive, and hosting storage/bandwidth limits still apply.
 
 ## Platform references
 

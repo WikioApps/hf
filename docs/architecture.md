@@ -1,6 +1,6 @@
 # Source guide
 
-The root `app.py` uses only the Python standard library to select the project’s `.venv`, then loads `bot/core/application.py`. This also handles hosts that activate a different `venv` before running `python app.py`. Re-execution uses `exec` to preserve the service process ID.
+The root `app.py` uses Python’s standard library to find `.venv`, `venv`, or the active virtual environment. Candidate interpreters must have a supported Python version, the exact dependencies from `requirements.txt`, and working application imports. An incomplete environment is skipped; a valid host-managed `venv` works without `.venv`. The launcher then runs `bot/core/application.py`, using `exec` when switching interpreters to preserve the service process ID. It never installs packages at startup.
 
 The application has one service process. Uvicorn starts the HTTP listener while the application lifespan launches bot initialization in a background task. Initialization waits for a MongoDB instance lease before connecting Telegram or recovering transfers. A separate heartbeat renews the lease throughout startup and operation using MongoDB’s clock. A supervisor persists active phases and refreshes Telegram status messages. Failure of that supervisor makes health checks fail and stops the service.
 
@@ -119,6 +119,8 @@ hf/
 │   │   ├── index.html
 │   │   └── style.css
 │   └── __init__.py
+├── .dockerignore
+├── Dockerfile
 ├── .env.example
 ├── .gitignore
 ├── README.md

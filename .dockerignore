@@ -1,0 +1,13 @@
+.git
+.env
+.env.*
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+**/*.session*
+tools
+hf-data
+downloads
+*.zip
+*.log
