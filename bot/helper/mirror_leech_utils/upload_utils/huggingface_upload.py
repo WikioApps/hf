@@ -11,7 +11,10 @@ def api_client(token):
     os.environ['HF_HUB_DISABLE_XET'] = '1'
     os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '0'
     os.environ['HF_HUB_DISABLE_PROGRESS_BARS'] = '1'
-    from huggingface_hub import HfApi, configure_http_backend
+    from huggingface_hub import HfApi, configure_http_backend, constants
+    # Hub constants may already be imported by another module in this worker.
+    constants.HF_HUB_DISABLE_XET = True
+    constants.HF_HUB_ENABLE_HF_TRANSFER = False
     import requests
     class Session(requests.Session):
         def request(self,*args,**kwargs):
@@ -27,10 +30,12 @@ def install_progress(report, total):
         def __init__(self,raw):
             super().__init__(raw)
             self.last = 0
+            self.high_water = 0
         def read(self,length=-1):
             data = super().read(length)
+            self.high_water = max(self.high_water,self.tell())
             if time.monotonic()-self.last > .3 or self.tell() == total:
-                report(phase='Upload',done=self.tell(),total=total)
+                report(phase='Upload',done=self.high_water,total=total)
                 self.last = time.monotonic()
             return data
     @contextlib.contextmanager
@@ -55,9 +60,9 @@ def remote_name(api, repo, dest, name):
 
 
 def upload(path, name, payload, report):
-    from huggingface_hub import CommitOperationAdd
     dest, token = payload['destination'], payload['token']
     api = api_client(token)
+    from huggingface_hub import CommitOperationAdd
     repo = dest['namespace']+'/'+dest['repo_name']
     report(phase='Prepare',done=0,total=os.path.getsize(path))
     api.create_repo(repo,repo_type=dest['repo_type'],private=dest['private'],exist_ok=True)
@@ -69,7 +74,9 @@ def upload(path, name, payload, report):
     if skipped:
         return {'path':remote,'url':url,'size':os.path.getsize(path),'skipped':True}
     install_progress(report,os.path.getsize(path))
+    report(phase='Hash',done=0,total=os.path.getsize(path))
     operation = CommitOperationAdd(path_in_repo=remote,path_or_fileobj=path)
+    report(phase='Prepare',done=0,total=os.path.getsize(path))
     api.preupload_lfs_files(repo,[operation],repo_type=dest['repo_type'],revision=dest['branch'],num_threads=1)
     report(phase='Commit')
     for attempt in range(4):

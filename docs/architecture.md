@@ -12,15 +12,18 @@ The application has one service process. Uvicorn starts the HTTP listener while 
 - `bot/helper/mirror_leech_utils`: download engines, archive operations, Hugging Face commits and task progress.
 - `web/backend`: HTTP routes, one-time Telegram sign-in, cookie sessions and authorization.
 - `web/frontend`: responsive HTML, CSS and plain JavaScript. No frontend build system is needed.
+- `bot/helper/mirror_leech_utils/download_utils/providers`: one module per named host; `resolver.py` provides bounded public HTTP metadata requests, and `direct_link_generator.py` dispatches URLs. `media_download.py` hosts yt-dlp/gallery-dl integrations; `mega_crypto.py` verifies streamed MEGA files.
 - `scripts`: verified user-space tool installation and the legacy InstaPods service detector.
 
 ## Transfer lifecycle
 
-A command or confirmed file creates a task and a destination snapshot. Download slots control input concurrency; upload slots independently control Hugging Face transfers. Different users and multiple tasks from one user use the same global pools. Extracted members are processed sequentially to limit disk use.
+A command or confirmed file creates a task and a destination snapshot. Download slots control input concurrency; upload slots independently control Hugging Face transfers. Different users and multiple tasks from one user use the same global pools. An archive uses one extraction worker at a time, while a bounded pool uploads completed members concurrently. Collections use bounded per-task pipelines and global download/upload slots. Every in-flight file has an independent progress object; the parent aggregates phases for Telegram and the website.
 
 The HF token is loaded from that user's current settings when an upload starts. The destination snapshot keeps an existing task pointed at its original repository even if the user changes settings while it runs. A retry continues with that destination and the current token.
 
 Progress is taken from aria2 RPC, Telegram's download callback, archive bytes written, or HF LFS transport reads. Hashing and commit finalization use separate phases without invented byte progress. Small files committed directly by the HF API may show Prepare/Commit without a separate upload bar.
+
+The resource manager reserves unwritten disk bytes, checks container-aware available memory and limits worker RSS. File cleanup follows HF confirmation and MongoDB bookkeeping. Local upload receipts permit recovery if bookkeeping fails after a commit.
 
 Subprocesses run in their own process groups and are terminated on cancellation or shutdown. Native archive children remain in their worker's group. Downloaded and extracted files are isolated by task locally; those internal task IDs never become remote folder names.
 
@@ -71,6 +74,7 @@ hf/
 │   │   │   ├── log_utils.py
 │   │   │   ├── network_utils.py
 │   │   │   ├── process_utils.py
+│   │   │   ├── resource_manager.py
 │   │   │   ├── task_manager.py
 │   │   │   └── worker.py
 │   │   ├── mirror_leech_utils/
@@ -79,9 +83,65 @@ hf/
 │   │   │   │   ├── sevenz.py
 │   │   │   │   └── zip_utils.py
 │   │   │   ├── download_utils/
+│   │   │   │   ├── providers/
+│   │   │   │   │   ├── __init__.py
+│   │   │   │   │   ├── bandcamp.py
+│   │   │   │   │   ├── bilibili.py
+│   │   │   │   │   ├── bitbucket.py
+│   │   │   │   │   ├── bluesky.py
+│   │   │   │   │   ├── bunkr.py
+│   │   │   │   │   ├── buzzheavier.py
+│   │   │   │   │   ├── catbox.py
+│   │   │   │   │   ├── cyberdrop.py
+│   │   │   │   │   ├── dailymotion.py
+│   │   │   │   │   ├── deviantart.py
+│   │   │   │   │   ├── direct.py
+│   │   │   │   │   ├── douyin.py
+│   │   │   │   │   ├── dropbox.py
+│   │   │   │   │   ├── facebook.py
+│   │   │   │   │   ├── flickr.py
+│   │   │   │   │   ├── giphy.py
+│   │   │   │   │   ├── github.py
+│   │   │   │   │   ├── gitlab.py
+│   │   │   │   │   ├── gofile.py
+│   │   │   │   │   ├── google_drive.py
+│   │   │   │   │   ├── huggingface.py
+│   │   │   │   │   ├── imagebam.py
+│   │   │   │   │   ├── imgbb.py
+│   │   │   │   │   ├── imgbox.py
+│   │   │   │   │   ├── imgur.py
+│   │   │   │   │   ├── instagram.py
+│   │   │   │   │   ├── internet_archive.py
+│   │   │   │   │   ├── krakenfiles.py
+│   │   │   │   │   ├── lensdump.py
+│   │   │   │   │   ├── mediafire.py
+│   │   │   │   │   ├── mega.py
+│   │   │   │   │   ├── mixdrop.py
+│   │   │   │   │   ├── pinterest.py
+│   │   │   │   │   ├── pixeldrain.py
+│   │   │   │   │   ├── pixhost.py
+│   │   │   │   │   ├── reddit.py
+│   │   │   │   │   ├── redgifs.py
+│   │   │   │   │   ├── rutube.py
+│   │   │   │   │   ├── soundcloud.py
+│   │   │   │   │   ├── streamable.py
+│   │   │   │   │   ├── streamtape.py
+│   │   │   │   │   ├── tiktok.py
+│   │   │   │   │   ├── tumblr.py
+│   │   │   │   │   ├── twitch.py
+│   │   │   │   │   ├── twitter.py
+│   │   │   │   │   ├── vimeo.py
+│   │   │   │   │   ├── vk.py
+│   │   │   │   │   ├── xiaohongshu.py
+│   │   │   │   │   ├── yandex_disk.py
+│   │   │   │   │   └── youtube.py
 │   │   │   │   ├── __init__.py
 │   │   │   │   ├── aria2_download.py
 │   │   │   │   ├── direct_link_generator.py
+│   │   │   │   ├── media_download.py
+│   │   │   │   ├── mega_crypto.py
+│   │   │   │   ├── mega_download.py
+│   │   │   │   ├── resolver.py
 │   │   │   │   └── telegram_download.py
 │   │   │   ├── status_utils/
 │   │   │   │   ├── __init__.py
@@ -106,8 +166,13 @@ hf/
 │   │   └── users_settings.py
 │   └── __init__.py
 ├── docs/
-│   └── architecture.md
+│   ├── licenses/
+│   │   └── siphon.txt
+│   ├── architecture.md
+│   ├── sources.md
+│   └── supported-sites.md
 ├── scripts/
+│   ├── install_media_tools.py
 │   ├── install_tools.py
 │   └── service_detection.py
 ├── web/
@@ -120,10 +185,11 @@ hf/
 │   │   └── style.css
 │   └── __init__.py
 ├── .dockerignore
-├── Dockerfile
 ├── .env.example
 ├── .gitignore
+├── Dockerfile
 ├── README.md
+├── THIRD_PARTY_NOTICES.md
 ├── app.py
 ├── build.sh
 ├── requirements.txt

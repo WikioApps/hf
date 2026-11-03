@@ -15,7 +15,8 @@ RUN apt-get update \
 
 WORKDIR /opt/hf/app
 
-COPY --chown=hfbot:hfbot requirements.txt app.py build.sh start.sh ./
+COPY --chown=hfbot:hfbot requirements.txt app.py build.sh start.sh THIRD_PARTY_NOTICES.md ./
+COPY --chown=hfbot:hfbot docs/licenses/ ./licenses/
 COPY --chown=hfbot:hfbot bot/ ./bot/
 COPY --chown=hfbot:hfbot web/ ./web/
 COPY --chown=hfbot:hfbot scripts/ ./scripts/

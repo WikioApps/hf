@@ -17,7 +17,12 @@ def safe_path(value, empty=False):
 
 
 def filename(value):
-    value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', value).strip('. ')[:180]
+    value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', value).strip('. ')
+    if len(value.encode('utf-8'))>180:
+        suffix=PurePosixPath(value).suffix
+        if len(suffix.encode('utf-8'))>30:suffix=''
+        stem=value[:-len(suffix)] if suffix else value
+        value=stem.encode('utf-8')[:180-len(suffix.encode('utf-8'))].decode('utf-8',errors='ignore')+suffix
     if not value:
         raise ValueError('Empty filename.')
     return value

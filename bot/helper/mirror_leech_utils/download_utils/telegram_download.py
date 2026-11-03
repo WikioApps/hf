@@ -10,7 +10,7 @@ async def download(task, client, settings):
     if not message or not message.file:
         raise ValueError('The Telegram source is unavailable. Forward the file again.')
     total = int(message.file.size or 0)
-    limit = settings['max_file_gb']*1024**3
+    limit = settings.get('byte_limit',settings['max_file_gb']*1024**3)
     if total > limit:
         raise ValueError('The Telegram file exceeds the configured size limit.')
     if not task.options.get('name'):

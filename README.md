@@ -5,11 +5,11 @@ A Telegram bot that downloads files and sends them to your Hugging Face account.
 ## What it does
 
 - Downloads Telegram documents, videos and other file attachments after you press **Upload**. **Cancel upload** and **For other purpose** leave the original message untouched.
-- Downloads direct HTTP links with aria2. Handles public Google Drive files, Dropbox, MediaFire and Pixeldrain links, plus single-file HTTP formats supported by yt-dlp.
+- Downloads direct HTTP files with aria2 and resolves public file hosts, folders, albums and playlists. Separate adapters cover MediaFire, Gofile, Pixeldrain, MEGA, Drive, Dropbox, Internet Archive and many video/image sites. See [supported links](docs/supported-sites.md).
 - Uploads to model or dataset repositories, including branches and nested folders. A destination of `movies/cdn` produces `movies/cdn/filename.ext`. Task IDs are never added to repository paths.
 - Runs multiple downloads and uploads for the same user. The owner chooses separate concurrency limits; the default is four of each.
-- Extracts archive members one at a time, uploads them, and removes the temporary extracted copy. Optional file selection is available before extraction. ZIP and 7Z creation are also supported.
-- Shows WZML-X-style progress, speed, ETA, engine and cancellation commands. Status views contain refresh and pagination controls and disappear when their visible tasks finish.
+- Extracts members one at a time while completed members upload concurrently. A bounded pipeline limits prepared files, reserves disk space and checks available memory. Confirmed uploads are saved before their local file is deleted. Optional archive selection, ZIP creation and 7Z creation are supported.
+- Shows task type, concurrent transfer phases, recent byte speed, ETA and cancellation commands. HF uses instrumented HTTP uploads so native Xet cannot bypass the progress counter. Status views contain refresh and pagination controls and disappear when their visible tasks finish.
 - Stores user access, destinations, task records, confirmed uploads, archive manifests and Telegram sessions in MongoDB. Failed transfers retain local files for retry.
 - Provides a responsive website with private transfer history, live activity and owner access controls. Public statistics are optional and contain counts only.
 - Registers Telegram commands automatically. Includes owner-only Speedtest.net results with the provider’s share image and detailed server statistics, plus `/logs` for the current application log.
@@ -40,6 +40,12 @@ docker run --rm --env-file .env -p 8000:8000 -v hf-data:/opt/hf/hf-data hf-uploa
 ```
 
 The `.env` file in that local command must contain your credentials and remain untracked. On a hosted deployment, enter credentials in the dashboard instead. The Dockerfile copies only application sources; `.dockerignore` also excludes local credentials and generated data.
+
+## Other Python hosts
+
+Use Python 3.12 on a long-running Linux x86_64 host with subprocesses, writable storage and outbound access to Telegram, MongoDB, Hugging Face and your source hosts. Docker is not required. The same installation/build/start commands below apply. ARM64 helper assets are included, but the complete runtime has been tested on x86_64.
+
+This service is not suitable for request-only serverless functions, browser Python, hosts that prohibit subprocesses, or free tiers that suspend background workers. No repository can remove those platform restrictions. Keep one active instance per bot token and use persistent storage for downloads that must survive redeployments.
 
 ## Deploy on InstaPods
 
@@ -78,7 +84,7 @@ sh start.sh
 
 Start runs the actual bot and Uvicorn in the foreground. It does not install packages or run tests. The launcher checks `.venv`, `venv`, and the active virtual environment, then uses one with a supported Python version, the pinned dependencies and working application imports. It exports that environment’s `bin` directory and `tools` in `PATH` and uses `exec` so the service manager can stop the application cleanly.
 
-Both observed InstaPods layouts are supported: an explicit build installing into `.venv`, and an auto-detected install using `venv` without a build stage. If InstaPods starts `source ~/app/venv/bin/activate && python app.py`, the launcher uses that environment when it contains the required packages. It can switch to `.venv` when that is the complete environment, or skip an incomplete `.venv` and use `venv`. No packages are installed during startup. Keep the explicit build command to install the 7-Zip helper needed for RAR, 7Z and AES ZIP; ordinary ZIP/TAR processing uses Python.
+Both observed InstaPods layouts are supported: an explicit build installing into `.venv`, and an auto-detected install using `venv` without a build stage. If InstaPods starts `source ~/app/venv/bin/activate && python app.py`, the launcher uses that environment when it contains the required packages. It can switch to `.venv` when that is the complete environment, or skip an incomplete `.venv` and use `venv`. No packages are installed during startup. Keep the explicit build command: it installs 7-Zip, FFmpeg and FFprobe. Ordinary ZIP/TAR processing uses Python; video merging and richer archive formats need their helpers.
 
 **Do not save `sh build.sh --build` as the Start command.** Earlier deployments selected `sh build.sh` and exited after building. A compatibility check now redirects bare `sh build.sh` to the launcher only when it is actually running inside `app.service`; explicit settings above remain the recommended configuration.
 
@@ -111,6 +117,7 @@ For MongoDB Atlas, create a database user with read/write access to this applica
 | `/select ID` | Reopen a pending archive selection menu. |
 | `/history` | Recent transfers and completion links. The owner sees all users. |
 | `/clean ID` | Remove retained local files for a finished task. Remote uploads remain. |
+| `/sites` | Public hosts, video sites and galleries, with a link to support details. |
 | `/stats` | CPU, memory, storage and current transfer counts. |
 | `/web` | Private, single-use website sign-in link, valid for five minutes. |
 | `/botsettings` | Owner: access, concurrency, limits and website URL. |
@@ -146,7 +153,7 @@ Extraction preserves member subfolders. Files with the same name can be renamed,
 
 ## Archives and download engines
 
-The app is written in Python. aria2 and 7-Zip are native helper executables installed into user-writable directories during the build. Native helpers provide accelerated HTTP downloads and broad RAR/7Z support; no Docker, apt, sudo or system-wide pip is used.
+The app is written in Python. The normal Python build installs aria2, 7-Zip, FFmpeg and FFprobe into the virtual environment or `tools/`, without apt, sudo, Node.js or system-wide pip. Docker is an optional packaging method; both deployment modes run the same application and transfer code.
 
 - aria2 1.37 is supplied by the pinned Python wheel. Downloads use multiple connections when the source supports range requests.
 - The installer downloads official 7-Zip 26.05, verifies its SHA-256 digest, and installs `tools/7zz`. The build fails if download, checksum or execution fails.
@@ -155,10 +162,22 @@ The app is written in Python. aria2 and 7-Zip are native helper executables inst
 - Split archives that need several separately uploaded volumes are not assembled automatically. Unsupported, corrupt or incomplete archives fail with a useful error.
 - Unsafe paths, archive links, duplicate member names, excessive expanded sizes and excessive file counts are rejected.
 - Solid RAR/7Z archives and compressed TARs may need repeated decompression for member-by-member processing. This saves disk space but can be slow.
-- yt-dlp resolves single-file HTTP media only. Playlists, segmented HLS/DASH streams and formats requiring FFmpeg merging are not included.
+- yt-dlp handles public videos, audio, bounded playlists and supported HLS/DASH streams. gallery-dl handles supported public galleries and albums. FFmpeg comes from the pinned imageio-ffmpeg wheel; FFprobe comes from a pinned, SHA-256-verified FFmpeg-Builds archive. Neither requires a browser-cookie upload.
 - Public Google Drive files use gdown. Private files, quota blocks, CAPTCHA and paid accounts require access this bot does not supply.
 
 Download and upload counts are separate. Queueing begins only when a configured slot or the global task limit is reached. Archive extraction is limited to one process to control resource use; other downloads and uploads can continue.
+
+## Concurrency, storage and memory
+
+The default is four download slots, four upload slots and three files in each preparation pipeline. Multiple tasks from the same user can run together. Extraction itself is limited to one worker globally; extracted members can upload concurrently, and the next member can extract while uploads continue. Collection downloads overlap uploads within the same limits. A collection containing archives also shares a per-task extracted-member limit.
+
+Disk reservations account for expected bytes that have not been written yet, so simultaneous downloads cannot all claim the same free space. The default disk floor is 1 GiB. Unknown-length downloads receive a fixed budget based on remaining capacity and the file-size limit; exceeding it stops that task with an error. Video downloads reserve space for merging. Failed and cancelled files continue to occupy real disk until retried or removed with `/clean`.
+
+Admission checks use available RAM, including Linux container memory limits. Child-worker memory is monitored; an over-budget worker is terminated within its task. New work can show **Wait** while existing uploads free space. A resource wait expires after 15 minutes with instructions to clean files or lower concurrency. These limits reduce exhaustion risk; they cannot guarantee survival if the host kills the whole service or external processes consume its resources.
+
+An uploaded file is deleted only after HF confirms it and the result is saved in MongoDB. A local upload receipt covers the gap between commit and bookkeeping. Archive sources remain until their selected members finish; retry can skip confirmed members. A failure inside one collection stops that collection's remaining children, not unrelated tasks.
+
+For a small host, use two downloads, two uploads and two prepared files in `/botsettings`. Start with 2 GiB RAM and enough disk for input archives, their largest concurrent members and the disk floor. The image build also needs space for dependencies and helper binaries.
 
 ## Website and health checks
 
@@ -238,10 +257,16 @@ This revision was built in a fresh Python 3.12 virtual environment. Local checks
 
 The Python 3.12 container build was also checked locally, including native helper execution, UID/GID 10001, writable data storage, dynamic HTTP port, missing-configuration errors, readiness before initialization, and SIGTERM shutdown. The local build used a temporary certificate mount for this workspace’s network proxy; no proxy certificate is stored in the shipped Dockerfile or image.
 
-Live Telegram authentication, real HF commits, host-specific websites, Speedtest.net and your actual InstaPods or Orkestr deployment require your credentials and network. A successful local build is not a verified production deployment. Archive support depends on the installed engine and the specific archive, and hosting storage/bandwidth limits still apply.
+This update additionally checks real HTTP LFS byte reporting after early Hub imports, actual overlapping ZIP extraction/uploads, prompt deletion, same-user collections through real aria2, cancellation isolation, competing disk reservations, zero-byte archive members, MEGA integrity boundaries and rejection of corrupt ciphertext, Drive folder paths, and a generated HLS stream through the bundled media tools. Public GitHub file and Internet Archive item resolution were checked live. Provider response fixtures cover parsing behavior, not a guarantee of live availability.
+
+Live Telegram authentication, real HF commits, all host-specific websites, Speedtest.net and your actual InstaPods or Orkestr deployment require your credentials and network. A successful local build is not a verified production deployment. Archive support depends on the installed engine and the specific archive, and hosting storage/bandwidth limits still apply.
 
 ## Platform references
 
 Deployment guidance is based on [InstaPods](https://instapods.com/), [GitHub deployment](https://instapods.com/deploy/github/), [About](https://instapods.com/about/), and the [official Python preset](https://docs.instapods.com/presets/python). The reported `/home/instapod/app`, Python 3.12, `.venv`, `app.service` and port 8000 are also consistent with the supplied pod logs. Plan-specific persistent storage, SSH permissions and health-check controls should be checked in your dashboard.
 
 Interaction patterns are inspired by [WZML-X](https://github.com/SilentDemonSD/WZML-X). This project has its own HF transfer implementation and does not claim full mirror/leech feature parity.
+
+## Source references
+
+Downloader research and implementation boundaries are listed in [docs/sources.md](docs/sources.md). Dependency notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

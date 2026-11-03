@@ -1,26 +1,102 @@
+"""Telegram's command menu and command-specific help share one catalogue."""
+from html import escape
+
 COMMANDS = {
-    'start': ('Open the bot', 'Welcome. Use /mirror to upload a link or reply to a file. Configure your destination in /usettings.'),
-    'help': ('Command help', 'Use /help command for details. Send /help mirror for upload options.'),
-    'mirror': ('Upload a link or replied file', '/mirror URL\nOr reply to a file with /mirror.\n-n "name.ext": rename\n-p "folder": destination folder\n-e: extract archive\n-s: select archive members (with -e)\n-z: compress as ZIP\n-7z: compress as 7Z\n-pw "password": archive password\nOne URL per line, each with its own options.'),
-    'usettings': ('Your Hugging Face settings', 'Set your HF token, owner or organization, repository, branch and folder. Fixed choices use buttons. This private menu applies to the owner too.'),
-    'status': ('Live transfer progress', 'Shows active transfers in this chat. Use /status me for your tasks only. The message is removed when its view has no active tasks.'),
-    'cancel': ('Stop a transfer', '/cancel ID stops an active task. Files are kept for retry. /cancel without an ID closes a settings prompt.'),
-    'retry': ('Retry a retained task', '/retry ID reuses available files and skips confirmed archive uploads. On a new host it re-downloads the original source.'),
-    'history': ('Recent uploads and failures', 'Your latest ten tasks, with completion links or retry buttons. The owner can view everyone’s records.'),
-    'select': ('Select archive members', '/select ID opens the file selection menu for a task started with -e -s.'),
-    'clean': ('Remove retained local files', '/clean ID removes local files for a finished task. Remote HF files and MongoDB history are kept.'),
-    'stats': ('Storage and transfer overview', 'Shows CPU, memory, disk space and active download/upload counts.'),
-    'speedtest': ('Measure network speed', 'Runs a real Speedtest.net download, upload and latency measurement. Sends the official result photo when available, with detailed server and transfer statistics. Falls back to the measured text result if sharing fails. One test at a time, with a five-minute cooldown after success.'),
-    'logs': ('Owner: download bot logs', 'Owner only, private chat. /logs sends the current logs.txt with transfer stages, worker errors and service events. Credentials and source URLs are redacted. Logs start with this deployment; unrelated host/system logs are not collected.'),
-    'web': ('Open your private web portal', 'Get a one-time sign-in link for the website. Set its HTTPS base URL in the owner’s /botsettings first. Do not share your personal sign-in link.'),
-    'botsettings': ('Owner: access and limits', 'Owner only. Set public access, public website statistics, concurrency, file limits and the website URL.'),
-    'users': ('Owner: manage user access', 'Owner only. View users and authorize or block them with buttons. Users keep their own HF destinations.'),
+    'start': ('Open the uploader', 'Set a destination with /usettings, then send a file or use /mirror URL. Forwarded files wait for your Upload button.'),
+    'help': ('Commands and examples', 'Use /help mirror for transfer options, /help usettings for destinations, or /sites for supported public links.'),
+    'mirror': ('Upload a link, collection or replied file', '''/mirror https://example.org/file.zip
+Reply to a Telegram attachment with /mirror.
+
+OPTIONS
+-e or -unzip — extract an archive, then upload its members
+-e -s — choose members before extraction (one archive)
+-z — create a ZIP before uploading
+-7z — create a 7Z before uploading
+-n "new name.ext" — rename one input file
+-p "folder/subfolder" — override your HF destination folder
+-pw "password" — open an encrypted archive
+
+EXAMPLES
+/mirror https://example.org/archive.zip -e
+/mirror https://example.org/archive.zip -e -s
+/mirror https://example.org/file.bin -p "backups"
+
+Put additional URLs on separate lines, with their own options. Public folders, galleries and playlists become one collection task. Rename and member selection apply to individual files. With -e on a collection, each input must be an archive.
+
+Extraction overlaps concurrent uploads within your configured limits. Local files are deleted after HF confirmation and the result is saved. /status shows separate download, extract and upload progress. A Wait state protects disk or memory; it does not cancel other tasks.
+
+Only public content is supported. You do not need to supply browser cookies. Hosts can still require login, restrict server IPs, expire links or enforce quotas.'''),
+    'usettings': ('Your Hugging Face destination', '''Open this menu privately. Set HF token → owner/organization → repository → repository type → branch → upload folder. Your token needs write access to that destination.
+
+Model/dataset, processing, visibility and filename collisions use buttons. Changes save to MongoDB; the owner uses the same personal settings. Enter a requested value as a new message: the bot removes that input and restores the settings menu.
+
+Existing filenames: Rename keeps both; Overwrite replaces the same remote path; Skip leaves the existing HF file untouched. No task-ID folder is added.'''),
+    'status': ('Live transfer progress', '''/status — active tasks visible to you in this chat
+/status me — only your transfers
+
+Task type stays visible: Upload, Extract → Upload, ZIP → Upload or 7Z → Upload. Each concurrent phase shows its actual bytes, recent speed and ETA when size is known. Hash/Prepare/Commit do not invent a transfer speed.
+
+Refresh updates the view; arrows appear only when needed. The status message is removed when its visible transfers finish.'''),
+    'cancel': ('Stop a transfer', '''/cancel ID
+Use the /cancel_ID link on a status card. Stops only that task and its child processes. Confirmed HF uploads remain; unuploaded local files stay for retry.
+
+/cancel without an ID closes your current settings prompt.'''),
+    'retry': ('Retry a failed or interrupted task', '''/retry ID
+Find the ID in the failure message or /history. Reuses complete local files and skips saved upload results. Public collections are resolved again so expired links can refresh.
+
+Moving hosts preserves settings/history in MongoDB. Local bytes require persistent storage; otherwise the source must still be available for a new download.'''),
+    'history': ('Recent transfers and results', 'Shows your latest ten tasks, completed file links and Retry/Clean buttons. The owner can view all users’ history. A partial failure preserves already confirmed uploads.'),
+    'select': ('Choose archive members', '/select ID\nReopens selection for a single archive submitted with -e -s. Choose files, then confirm to start extraction. Selection expires after one hour.'),
+    'clean': ('Remove retained local files', '/clean ID\nDeletes retained download/extraction files for a finished, failed or cancelled task. Cancel running tasks first. Hugging Face files and MongoDB history are preserved.'),
+    'stats': ('CPU, memory, disk and transfer slots', 'Shows current CPU, memory, free disk, uptime and occupied download/upload slots. Set concurrency and disk reserve through the owner’s /botsettings. Unknown-length downloads receive a fixed disk budget.'),
+    'sites': ('Supported public links', 'Public file hosts, folders, video sites, galleries and playlists. Use /sites for the current list and documented limitations. No browser-cookie upload is required.'),
+    'speedtest': ('Owner: measure network speed', 'Owner only, private chat. Runs a real Speedtest.net download/upload/latency measurement. Sends the official share image when available, otherwise the measured text result. One test at a time; five-minute cooldown after success. Provider failures are saved in /logs.'),
+    'logs': ('Owner: download real bot logs', 'Owner only, private chat. /logs sends logs.txt with transfer phases, worker errors and service events. Tokens and source URLs are redacted. Unrelated host/system journals are not included.'),
+    'web': ('Open your private web portal', 'Use /web privately for a single-use sign-in link valid for five minutes. The owner must first set the HTTPS Website URL in /botsettings. Never share your personal sign-in link.'),
+    'botsettings': ('Owner: access, resources and limits', '''Owner only, private chat. Changes save to MongoDB and apply on every host.
+
+Allow everyone — public access; off by default
+Concurrent downloads/uploads — global slot limits, shared by tasks
+Files prepared per task — bounds extraction/collection overlap
+Keep disk free — space the bot reserves for the service
+Collection/archive/file limits — bound expansion and task size
+Website URL/public statistics — portal origin and optional public counts
+
+For a small host, start with two downloads, two uploads and two prepared files. More slots cannot exceed available disk or RAM.'''),
+    'users': ('Owner: manage user access', 'Owner only, private chat. Authorize, block or reset users with buttons. With public access off, only the owner and authorized users can transfer. Every user configures a separate HF destination in /usettings.'),
 }
-ALIASES = {'m':'mirror','upload':'mirror','u':'mirror','s':'status','us':'usettings','settings':'usettings','usetting':'usettings','log':'logs'}
+ALIASES={'m':'mirror','upload':'mirror','u':'mirror','s':'status','us':'usettings','settings':'usettings','usetting':'usettings','log':'logs'}
 
 
 def help_text(command=''):
-    from html import escape
+    command=ALIASES.get(command,command)
     if command in COMMANDS:
-        return '<b>/'+command+'</b>\n\n'+escape(COMMANDS[command][1])
-    return '<b>Commands</b>\n\n'+'\n'.join('/'+name+' — '+escape(info[0]) for name,info in COMMANDS.items())+'\n\nUse /help command for examples.'
+        title,body=COMMANDS[command]
+        return '<b>/'+command+' · '+escape(title)+'</b>\n\n'+escape(body)
+    groups=[('Transfers',('mirror','status','cancel','retry','select','clean','history')),
+            ('Your account',('usettings','sites','web','stats')),
+            ('Owner tools',('botsettings','users','logs','speedtest'))]
+    text='<b>Hugging Face Uploader</b>\nPublic links and Telegram files → your repository.\n'
+    for title,names in groups:
+        text+='\n<b>'+title+'</b>\n'+'\n'.join('/'+name+' — '+escape(COMMANDS[name][0]) for name in names)+'\n'
+    return text+'\n<code>/help mirror</code> shows options and examples.'
+
+
+def sites_text():
+    return '''<b>Public-link support</b>
+
+<b>Files &amp; folders</b>
+MediaFire · Gofile · Pixeldrain files/lists · MEGA files/folders · Google Drive files/folders · Dropbox shared downloads · Yandex Disk · Internet Archive items · GitHub/GitLab/Bitbucket files · Hugging Face files · Buzzheavier · Krakenfiles · Catbox
+
+<b>Video &amp; audio</b>
+YouTube · Vimeo · Dailymotion · TikTok · Instagram · Facebook · X/Twitter · Reddit · Twitch · SoundCloud · Bandcamp · Bilibili · Douyin · Xiaohongshu · VK · Rutube · Streamable · Streamtape · Mixdrop · Redgifs · Giphy
+
+<b>Images &amp; albums</b>
+Cyberdrop · Bunkr · Imgur · Flickr · ImageBam · Imgbox · Pixhost · ImgBB · Lensdump · Pinterest · Tumblr · DeviantArt · Bluesky
+
+Other public sites recognized by the installed yt-dlp/gallery-dl versions are tried automatically. Playlists and collections are bounded by the owner's limits. HLS/DASH can use the build-installed FFmpeg helper.
+
+No supplied cookies are needed. Login-only, DRM-protected, paid, region/IP-blocked or browser-challenged content may be unavailable; automatic guest sessions cannot remove those restrictions.
+
+<a href="https://github.com/WikioApps/hf/blob/main/docs/supported-sites.md">Support details and limitations</a>
+/help mirror · /usettings'''

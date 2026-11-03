@@ -13,22 +13,6 @@ def report(**data):
     print(json.dumps(data),flush=True)
 
 
-def resolve(url):
-    import yt_dlp
-    class Quiet:
-        def debug(self,*args): pass
-        def warning(self,*args): pass
-        def error(self,*args): pass
-    options = {'quiet':True,'logger':Quiet(),'noplaylist':True,'cachedir':False,
-               'socket_timeout':30,'format':'best[protocol=https]/best[protocol=http]'}
-    with yt_dlp.YoutubeDL(options) as client:
-        info = client.extract_info(url,download=False)
-        if info.get('entries') or not info.get('url','').startswith(('http://','https://')):
-            raise ValueError('No single-file HTTP format is available for this URL.')
-        return {'url':info['url'],'name':filename(client.prepare_filename(info)),
-                'headers':info.get('http_headers',{}),'total':info.get('filesize') or 0}
-
-
 def drive(url, output, limit):
     import gdown
     import importlib
@@ -62,9 +46,25 @@ def drive(url, output, limit):
 def main():
     mode,*args = sys.argv[1:]
     payload = json.loads(sys.stdin.readline() or '{}')
+    if payload.get('_memory_limit_bytes'):
+        import resource
+        budget=int(payload['_memory_limit_bytes'])
+        resource.setrlimit(resource.RLIMIT_AS,(budget,budget))
     register_secrets(payload.get('token'),payload.get('password'))
     logging.info('Worker started operation=%s',mode)
-    if mode == 'upload':
+    if mode in ('catalog','media','mega','drive'):
+        from bot.helper.ext_utils.network_utils import guard_worker_requests
+        guard_worker_requests()
+    if mode == 'catalog':
+        from bot.helper.mirror_leech_utils.download_utils.media_download import catalog
+        result = catalog(payload['url'],payload.get('engine','media'),payload.get('limit',1000))
+    elif mode == 'media':
+        from bot.helper.mirror_leech_utils.download_utils.media_download import download
+        result = download(payload['url'],args[0],int(args[1]),report)
+    elif mode == 'mega':
+        from bot.helper.mirror_leech_utils.download_utils.mega_download import download
+        result = download(payload['info'],args[0],int(args[1]),report)
+    elif mode == 'upload':
         from bot.helper.mirror_leech_utils.upload_utils.huggingface_upload import upload
         result = upload(args[0],args[1],payload,report)
     elif mode == 'inspect_hf':
@@ -75,10 +75,8 @@ def main():
         from bot.helper.mirror_leech_utils.upload_utils.huggingface_upload import api_client
         result = api_client(payload['token']).list_repo_refs(payload['repo'],repo_type=payload['repo_type'])
         result = [branch.name for branch in result.branches]
-    elif mode == 'resolve':
-        result = resolve(args[0])
     elif mode == 'drive':
-        result = drive(args[0],args[1],int(args[2]))
+        result = drive(payload['url'],args[0],int(args[1]))
     elif mode in ('list','extract','compress'):
         from bot.helper.mirror_leech_utils.archive_utils import sevenz
         if mode == 'list':
@@ -119,6 +117,8 @@ if __name__ == '__main__':
         logging.exception('Worker failed')
         status = getattr(getattr(error,'response',None),'status_code',None)
         message = str(error) if type(error) is ValueError and len(str(error)) < 250 and 'http' not in str(error).lower() else type(error).__name__
+        if isinstance(error,MemoryError):
+            message = 'This worker reached its memory budget. Use a larger host for this file or lower concurrency.'
         if isinstance(error,FileNotFoundError):
             message = 'Required local file or executable is missing: '+Path(error.filename or 'unknown').name+'. Check /logs and the build output.'
         report(error=redact(message)+(f' (HTTP {status})' if status else ''))

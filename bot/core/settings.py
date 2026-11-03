@@ -11,6 +11,7 @@ USER_DEFAULTS = {
 BOT_DEFAULTS = {
     'public_mode': False, 'public_status': False, 'download_slots': 4,
     'upload_slots': 4, 'max_tasks': 40, 'max_file_gb': 20,
+    'disk_reserve_mb': 1024, 'pipeline_files': 3, 'collection_files': 1000,
     'archive_gb': 80, 'archive_files': 10000, 'base_url': '',
 }
 CHOICES = {
@@ -19,6 +20,7 @@ CHOICES = {
     'processing': ['none', 'extract', 'zip', '7z'],
     'public_mode': [False, True], 'public_status': [False, True],
     'download_slots': [1, 2, 4, 6, 8], 'upload_slots': [1, 2, 4, 6, 8],
+    'disk_reserve_mb': [512,1024,2048,4096], 'pipeline_files': [1,2,3,4], 'collection_files': [100,500,1000,2000],
     'max_tasks': [10, 20, 40, 80], 'max_file_gb': [2, 5, 10, 20, 50, 100],
     'archive_gb': [10, 25, 50, 80, 150], 'archive_files': [1000, 5000, 10000],
 }
@@ -30,7 +32,8 @@ LABELS = {
     'public_status': 'Public website statistics', 'download_slots': 'Concurrent downloads',
     'upload_slots': 'Concurrent uploads', 'max_tasks': 'Active task limit',
     'max_file_gb': 'Maximum file size (GiB)', 'archive_gb': 'Expanded archive limit (GiB)',
-    'archive_files': 'Archive file limit', 'base_url': 'Website URL',
+    'disk_reserve_mb':'Keep disk free (MiB)', 'pipeline_files':'Files prepared per task',
+    'collection_files':'Collection file limit', 'archive_files': 'Archive file limit', 'base_url': 'Website URL',
 }
 
 def validate(key, value):

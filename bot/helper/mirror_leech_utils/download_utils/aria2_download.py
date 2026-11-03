@@ -14,7 +14,7 @@ async def download(task, info, settings):
     if not binary:
         raise ValueError('aria2c is missing. Run the build step to install requirements.')
     check_space(task.directory, info.get('total',0))
-    limit = settings['max_file_gb'] * 1024**3
+    limit = settings.get('byte_limit',settings['max_file_gb'] * 1024**3)
     if info.get('total',0) > limit:
         raise ValueError('The file exceeds the configured size limit.')
     sock = socket.socket()
@@ -47,7 +47,7 @@ async def download(task, info, settings):
                 except httpx.TransportError:
                     await asyncio.sleep(.1)
             options = {'dir':str(task.directory),'out':'source','header':[
-                f'{k}: {v}' for k,v in info.get('headers',{}).items() if '\n' not in str(v)]}
+                f'{k}: {v}' for k,v in info.get('headers',{}).items() if '\n' not in str(v) and '\r' not in str(v) and '\n' not in str(k) and '\r' not in str(k)]}
             gid = await rpc('addUri',[info['url']],options)
             task.engine = 'aria2 1.37'
             task.stage('Download',info.get('total',0))
@@ -64,7 +64,7 @@ async def download(task, info, settings):
                         logging.getLogger(__name__).error('aria2 missing output task=%s files=%s',task.id,data.get('files',[]))
                         raise ValueError('aria2 completed without the expected local file. Retry after updating the bot.')
                     actual = target.stat().st_size
-                    if task.total and actual != task.total:
+                    if (task.total and actual != task.total) or (info.get('total') and actual != int(info['total'])):
                         raise ValueError('Downloaded file size does not match the source. Retry the download.')
                     return target
                 if data['status'] in ('error','removed'):

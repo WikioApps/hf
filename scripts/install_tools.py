@@ -42,7 +42,9 @@ def install():
     if not binary:
         raise SystemExit('aria2c is missing from the virtual environment.')
     subprocess.run([binary,'--version'],check=True,stdout=subprocess.DEVNULL)
-    print('aria2 and 7-Zip are ready.')
+    from install_media_tools import install as install_media
+    install_media(ROOT/'tools')
+    print('aria2, 7-Zip, FFmpeg and FFprobe are ready.')
 
 if __name__ == '__main__':
     install()

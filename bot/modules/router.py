@@ -1,7 +1,7 @@
 from html import escape
 import re
 from telethon import Button, errors
-from bot.helper.telegram_helper.bot_commands import ALIASES, help_text
+from bot.helper.telegram_helper.bot_commands import ALIASES, help_text, sites_text
 from bot.modules import mirror, users, selection, speedtest
 from bot.modules.logs import send_logs
 
@@ -39,12 +39,13 @@ class Router:
         return ALIASES.get(command,command),body
 
     async def intro(self,event,command,body):
-        if command == 'help': return await event.reply(help_text(body.strip().lstrip('/')),parse_mode='html')
+        if command == 'help': return await event.reply(help_text(body.strip().lstrip('/')),parse_mode='html',link_preview=False)
         if event.sender_id == self.r.config.owner_id:
             await self.r.register_commands()
-        await event.reply('<b>Hugging Face Uploader</b>\nConfigure /usettings, then send a file or use /mirror URL.\n/help · /status · /history',parse_mode='html')
+        await event.reply('<b>Hugging Face Uploader</b>\nPublic links and Telegram files → your repository.\n\nSet /usettings, then use <code>/mirror URL</code>.\n/help · /sites · /status',parse_mode='html',buttons=[[Button.inline('Upload guide','help:mirror'),Button.inline('All commands','help:all')]])
 
     async def dispatch(self,event,command,body):
+        if command == 'sites': return await event.reply(sites_text(),parse_mode='html',link_preview=False)
         if command == 'mirror': return await mirror.mirror(self.r,event,body)
         if command == 'usettings': return await self.r.menus.show(event)
         if command == 'botsettings':
@@ -112,7 +113,8 @@ class Router:
             if not await self.r.db.allowed(event.sender_id): raise ValueError('Access denied.')
             parts = event.data.decode().split(':')
             await event.answer()
-            if parts[0] == 'cfg': await self.r.menus.callback(event,parts)
+            if parts[0] == 'help': await event.edit(help_text(parts[1]),parse_mode='html',buttons=[[Button.inline('All commands','help:all')]] if parts[1]!='all' else None)
+            elif parts[0] == 'cfg': await self.r.menus.callback(event,parts)
             elif parts[0] == 'st': await self.r.status.callback(event,parts)
             elif parts[0] == 'usr': await users.callback(self.r,event,parts)
             elif parts[0] == 'file': await mirror.callback(self.r,event,parts)

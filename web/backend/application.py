@@ -139,6 +139,9 @@ async def body(request):
 
 
 def task_data(task):
-    return {'id':task.id,'name':task.name,'phase':task.phase,'done':task.done,'total':task.total,
-            'speed':task.speed if task.phase in ('Download','Upload','Extract') else 0,
-            'eta':task.eta,'created':task.created,'user':task.user_id}
+    groups=task.snapshot()
+    progress=next((g for phase in ('Upload','Download','Extract') for g in groups if g['phase']==phase),groups[0])
+    return {'id':task.id,'name':task.name,'phase':task.phase,'done':progress['done'],'total':progress['total'],
+            'speed':progress['speed'],'eta':None,'created':task.created,'user':task.user_id,
+            'operation':task.operation,'groups':groups,'uploaded_files':len(task.results),
+            'wait_reason':task.wait_reason}

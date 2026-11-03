@@ -11,7 +11,18 @@ function link(url, label) { const a = node('a',label,'button'); if(url.startsWit
 function renderActive(tasks) {
   $('active').replaceChildren();
   if(!tasks.length) $('active').append(node('p','All caught up. No transfers are running.','empty'));
-  for(const t of tasks) { const card=node('article',undefined,'task'); card.append(node('h3',t.name),node('span',t.phase,'badge')); const progress=node('progress'); progress.max=t.total || 1; if(t.total) progress.value=t.done; card.append(progress,node('p',`${bytes(t.done)}${t.total ? ' / '+bytes(t.total) : ''} · ${bytes(t.speed)}/s`),button('Cancel',()=>action({action:'cancel',id:t.id}))); $('active').append(card); }
+  for(const t of tasks) {
+    const card=node('article',undefined,'task');
+    card.append(node('h3',t.name),node('span',t.operation || t.phase,'badge'));
+    for(const group of t.groups || [t]) {
+      const bar=node('progress'); bar.max=group.total || 1; if(group.total)bar.value=group.done;
+      card.append(node('p',`${group.phase}${group.count>1?' ×'+group.count:''}`));
+      if(['Download','Upload','Extract'].includes(group.phase)) card.append(bar,node('p',`${bytes(group.done)}${group.total?' / '+bytes(group.total):''} · ${bytes(group.speed)}/s`));
+    }
+    if(t.wait_reason)card.append(node('p',t.wait_reason));
+    card.append(node('small',`${t.uploaded_files || 0} files uploaded`),button('Cancel',()=>action({action:'cancel',id:t.id})));
+    $('active').append(card);
+  }
 }
 function renderHistory(records) {
   $('history').replaceChildren();
@@ -22,7 +33,7 @@ function renderAdmin(data) {
   $('admin').hidden = !data.user.owner; if(!data.user.owner) return;
   if($('admin').contains(document.activeElement) && document.activeElement.tagName==='SELECT') return;
   $('settings').replaceChildren();
-  const fields = [['public_mode','Allow everyone',[false,true]],['public_status','Public statistics',[false,true]],['download_slots','Concurrent downloads',[1,2,4,6,8]],['upload_slots','Concurrent uploads',[1,2,4,6,8]]];
+  const fields = [['public_mode','Allow everyone',[false,true]],['public_status','Public statistics',[false,true]],['download_slots','Concurrent downloads',[1,2,4,6,8]],['upload_slots','Concurrent uploads',[1,2,4,6,8]],['pipeline_files','Files prepared per task',[1,2,3,4]],['disk_reserve_mb','Keep disk free (MiB)',[512,1024,2048,4096]]];
   for(const [key,title,choices] of fields) { const label=node('label',title), select=node('select'); for(const value of choices) { const option=node('option',typeof value === 'boolean' ? (value?'On':'Off') : value); option.value=JSON.stringify(value); option.selected=data.settings[key]===value; select.append(option); } select.onchange=async()=>{ try{await action({action:'setting',key,value:JSON.parse(select.value)});}catch(e){notice(e.message);} }; label.append(select); $('settings').append(label); }
   $('users').replaceChildren();
   for(const u of data.users) { const row=node('div',undefined,'user-row'), main=node('div',undefined,'row-main'), controls=node('div',undefined,'row-actions'); main.append(node('strong',u.name||String(u.user_id)),node('small',`${u.user_id} · ${u.blocked?'Blocked':u.authorized?'Authorized':'Public policy'}`)); if(u.user_id!==data.user.id) for(const [cmd,title] of [['allow','Authorize'],['block','Block'],['reset','Reset']]) controls.append(button(title,()=>action({action:cmd,user:u.user_id}))); row.append(main,controls); $('users').append(row); }
@@ -36,7 +47,7 @@ async function refresh() {
     const response=await fetch('/api/me?offset='+offset,{credentials:'same-origin'}); if(response.status===401){$('guest').hidden=false;$('portal').hidden=true;$('logout').hidden=true;return;} if(!response.ok)throw new Error('Could not load your transfers.'); const data=await response.json();
     $('portal').hidden=false;$('guest').hidden=true;$('logout').hidden=false;$('welcome').textContent=`${data.user.owner?'OWNER':'YOUR PORTAL'} · ${data.user.name}`;
     const dest=data.destination; $('destination').textContent=dest.namespace&&dest.repo_name ? `${dest.namespace}/${dest.repo_name} · ${dest.repo_type} · ${dest.branch} · /${dest.path}` : 'Choose a destination in /usettings before your first upload.';
-    $('summary').replaceChildren(); for(const [value,label] of [[data.active.length,'Active'],[data.active.filter(t=>t.phase==='Download').length,'Downloading'],[data.active.filter(t=>['Upload','Commit'].includes(t.phase)).length,'Uploading']]) { const box=node('div',undefined,'metric');box.append(node('strong',value),node('span',label));$('summary').append(box); }
+    $('summary').replaceChildren(); for(const [value,label] of [[data.active.length,'Active'],[data.active.filter(t=>(t.groups||[t]).some(g=>g.phase==='Download')).length,'Downloading'],[data.active.filter(t=>(t.groups||[t]).some(g=>['Upload','Commit'].includes(g.phase))).length,'Uploading']]) { const box=node('div',undefined,'metric');box.append(node('strong',value),node('span',label));$('summary').append(box); }
     renderActive(data.active);renderHistory(data.history);renderAdmin(data);
   } catch(e){notice(e.message);} finally{busy=false;}
 }

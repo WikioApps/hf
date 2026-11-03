@@ -8,17 +8,25 @@ from bot.helper.ext_utils.format_utils import size, duration, progress
 
 
 def task_text(task):
-    text = f'<b><i>{escape(task.name[:120])}</i></b>\n'
-    if task.current:
-        text += f'┖ <i>{escape(task.current[:100])}</i>\n'
-    if task.phase in ('Download','Upload','Extract'):
-        text += f'┟ {progress(task.done,task.total)}\n'
-        text += f'┠ <b>Processed</b> → {size(task.done)} of {size(task.total) if task.total else "?"}\n'
-        text += f'┠ <b>Speed</b> → {size(task.speed)}/s\n'
-        text += f'┠ <b>ETA</b> → {duration(task.eta)} | <b>Elapsed</b> → {duration(time.time()-task.created)}\n'
-    text += f'┠ <b>Status</b> → {task.phase} | <b>Engine</b> → {escape(task.engine)}\n'
+    text = f'<b>{escape(task.name[:100])}</b>\n'
+    text += f'┠ <b>Task</b> → {escape(task.operation)}\n'
+    groups = task.snapshot()
+    for group in groups[:3]:
+        phase,done,total,speed = (group[k] for k in ('phase','done','total','speed'))
+        count = ' ×'+str(group['count']) if group['count']>1 else ''
+        text += f'┠ <b>{escape(phase)}{count}</b>'
+        if phase in ('Download','Upload','Extract'):
+            eta=max(0,total-done)/speed if speed and total else None
+            text += f' {progress(done,total)}\n┠ {size(done)} / {size(total) if total else "?"} · {size(speed)}/s · ETA {duration(eta)}'
+        text += '\n'
+    waiting = next((c.wait_reason for c in task.lanes.values() if c.wait_reason),task.wait_reason)
+    if waiting:text += '┠ '+escape(waiting)+'\n'
+    if task.lanes:
+        names = [c.name for c in task.lanes.values() if c.phase not in ('Pipeline','Complete')]
+        text += '┠ '+escape(' · '.join(names[:2])[:130])+'\n'
+    text += f'┠ <b>Uploaded</b> → {len(task.results)} files · <b>Elapsed</b> → {duration(time.time()-task.created)}\n'
     text += f'┠ <b>User</b> → <a href="tg://user?id={task.user_id}">{task.user_id}</a>\n'
-    return text + f'┖ /cancel_{task.id}\n'
+    return text+f'┖ /cancel_{task.id}\n'
 
 
 class StatusViews:
