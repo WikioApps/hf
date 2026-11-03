@@ -183,6 +183,7 @@ jobs:
           
                       runtime.settings['base_url']='https://bot.example'
                       app = create_app(runtime)
+                      await db.update_user(2,'authorized',True)
                       raw = await db.issue_session(2,'web')
                       async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='https://bot.example') as client:
                           result = await client.post('/api/action',json={'action':'clear_history'},headers={'origin':'https://bot.example'})
@@ -193,7 +194,13 @@ jobs:
                           result = await client.post('/api/action',json={'action':'clear_history'},headers={'origin':'https://bot.example'})
                           assert result.status_code == 200
                       assert active.directory.exists()
-                      print('PASS portal history deletion requires session, authorization and matching origin')
+                      other = make_task(root,3,'Complete')
+                      (other.directory/'source').write_bytes(b'old')
+                      await manager.save(other)
+                      await manager.clear_history(1)
+                      assert not other.directory.exists() and active.directory.exists()
+                      assert await db.db.users.count_documents({'bot':db.scope,'user_id':2}) == 1
+                      print('PASS portal deletion authentication/origin checks and owner clear-all scope')
                   finally:
                       await db.client.drop_database('hf_checks')
                       await db.close()
