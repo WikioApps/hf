@@ -12,6 +12,7 @@ BOT_DEFAULTS = {
     'public_mode': False, 'public_status': False, 'download_slots': 4,
     'upload_slots': 4, 'max_tasks': 40, 'max_file_gb': 20,
     'disk_reserve_mb': 1024, 'pipeline_files': 3, 'collection_files': 1000,
+    'failed_file_minutes': 15, 'history_days': 7,
     'archive_gb': 80, 'archive_files': 10000, 'base_url': '',
 }
 CHOICES = {
@@ -21,10 +22,12 @@ CHOICES = {
     'public_mode': [False, True], 'public_status': [False, True],
     'download_slots': [1, 2, 4, 6, 8], 'upload_slots': [1, 2, 4, 6, 8],
     'disk_reserve_mb': [512,1024,2048,4096], 'pipeline_files': [1,2,3,4], 'collection_files': [100,500,1000,2000],
+    'failed_file_minutes': [0,15,60], 'history_days': [1,7,30],
     'max_tasks': [10, 20, 40, 80], 'max_file_gb': [2, 5, 10, 20, 50, 100],
     'archive_gb': [10, 25, 50, 80, 150], 'archive_files': [1000, 5000, 10000],
 }
 LABELS = {
+    'failed_file_minutes': 'Keep failed files (minutes)', 'history_days': 'Keep transfer history (days)',
     'token': 'HF token', 'namespace': 'Owner / organization', 'repo_name': 'Repository',
     'repo_type': 'Repository type', 'branch': 'Branch', 'path': 'Upload folder',
     'private': 'Private new repository', 'collision': 'Existing filenames',

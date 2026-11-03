@@ -68,6 +68,7 @@ hf/
 │   ├── helper/
 │   │   ├── ext_utils/
 │   │   │   ├── __init__.py
+│   │   │   ├── cleanup.py
 │   │   │   ├── db_handler.py
 │   │   │   ├── files_utils.py
 │   │   │   ├── format_utils.py
@@ -138,6 +139,7 @@ hf/
 │   │   │   │   ├── __init__.py
 │   │   │   │   ├── aria2_download.py
 │   │   │   │   ├── direct_link_generator.py
+│   │   │   │   ├── http_download.py
 │   │   │   │   ├── media_download.py
 │   │   │   │   ├── mega_crypto.py
 │   │   │   │   ├── mega_download.py
@@ -195,3 +197,9 @@ hf/
 ├── requirements.txt
 └── start.sh
 ```
+
+## Storage and history lifecycle
+
+`cleanup.py` removes only inactive task directories, coordinates with submissions/retries, and purges finished MongoDB records and their upload/manifest children. Completed and cancelled files are removed immediately; failed/interrupted files default to a 15-minute retry window. Finished history defaults to seven days. User settings and authorization are independent of this lifecycle.
+
+`resource_manager.py` distinguishes physical disk allocation from logical sparse-file length. Unknown-length streams reserve a small rolling window; completed downloads release reservations before processing. `http_download.py` streams small direct responses in-process, while large files continue through aria2. `telegram_helper/button.py` owns native Telegram button colors so menus share the same action conventions.

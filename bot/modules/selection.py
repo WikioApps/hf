@@ -1,5 +1,5 @@
 from html import escape
-from telethon import Button
+from bot.helper.telegram_helper.button import Button
 
 
 def render(task, page):
@@ -9,7 +9,7 @@ def render(task, page):
     buttons = []
     for index in range(page*8,min(len(task.members),(page+1)*8)):
         mark = '✓ ' if index in task.selected else '○ '
-        buttons.append([Button.inline(mark+task.members[index]['name'][:55],f'sel:{task.id}:toggle:{index}:{page}')])
+        buttons.append([Button.inline(mark+task.members[index]['name'][:55],f'sel:{task.id}:toggle:{index}:{page}',style='success' if index in task.selected else None)])
     buttons += [[Button.inline('All',f'sel:{task.id}:all:0:{page}'),Button.inline('None',f'sel:{task.id}:none:0:{page}')],
                 [Button.inline('‹',f'sel:{task.id}:page:0:{page-1}'),Button.inline('›',f'sel:{task.id}:page:0:{page+1}')],
                 [Button.inline('Upload selected',f'sel:{task.id}:go:0:{page}'),Button.inline('Cancel',f'sel:{task.id}:cancel:0:{page}')]]

@@ -1,6 +1,7 @@
 import time
 from html import escape
-from telethon import Button, errors
+from telethon import errors
+from bot.helper.telegram_helper.button import Button
 from bot.core.settings import BOT_DEFAULTS, CHOICES, LABELS, validate
 from bot.helper.ext_utils.process_utils import run_worker
 from bot.helper.ext_utils.log_utils import register_secrets
@@ -121,7 +122,7 @@ class SettingsMenu:
         if len(parts)>4:
             return await self.choose(event,uid,scope,key,parts[4],values)
         if key in CHOICES:
-            buttons = [[Button.inline(str(value),f'cfg:{uid}:{scope}:{key}:{i}')] for i,value in enumerate(CHOICES[key])]
+            buttons = [[Button.inline(str(value),f'cfg:{uid}:{scope}:{key}:{i}',style='success' if value == values[key] else 'primary')] for i,value in enumerate(CHOICES[key])]
         elif key == 'namespace' and values.get('namespaces'):
             buttons = [[Button.inline(value,f'cfg:{uid}:{scope}:{key}:{i}')] for i,value in enumerate(values['namespaces'][:30])]
         elif key == 'branch':buttons = await self.branches(uid,scope,values)

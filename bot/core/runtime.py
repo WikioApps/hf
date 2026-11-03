@@ -124,6 +124,9 @@ class Runtime:
         self.state = 'ready'
         self.db_checked = time.monotonic()
         self.monitor = asyncio.create_task(self.supervise())
+        cleanup = asyncio.create_task(self.manager.maintenance.run(),name='task-cleanup')
+        self.auxiliary.add(cleanup)
+        cleanup.add_done_callback(self.auxiliary.discard)
         self.logger.info('Bot connected; commands registered; MongoDB ready')
 
     async def register_commands(self):
@@ -154,7 +157,8 @@ class Runtime:
                     if not self.client.is_connected():
                         raise RuntimeError('Telegram disconnected')
                 for task in self.manager.active():
-                    await self.manager.save(task)
+                    if task in self.manager.active():
+                        await self.manager.save(task)
                 await self.status.refresh_all()
                 self.offers = {k:v for k,v in self.offers.items() if v['expires'] > time.monotonic()}
                 await asyncio.sleep(5)

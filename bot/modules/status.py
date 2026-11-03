@@ -3,7 +3,8 @@ from html import escape
 import shutil
 import time
 import psutil
-from telethon import Button, errors
+from telethon import errors
+from bot.helper.telegram_helper.button import Button
 from bot.helper.ext_utils.format_utils import size, duration, progress
 
 
@@ -37,7 +38,10 @@ class StatusViews:
 
     def stats(self):
         disk = shutil.disk_usage(self.runtime.config.data)
-        return f'⌬ <b>Bot Stats</b>\n┟ <b>CPU</b> → {psutil.cpu_percent()}% | <b>Free</b> → {size(disk.free)}\n┖ <b>RAM</b> → {psutil.virtual_memory().percent}% | <b>Uptime</b> → {duration(time.time()-self.runtime.started)}'
+        resources = self.runtime.manager.resources
+        return (f'⌬ <b>Bot Stats</b>\n┟ <b>CPU</b> → {psutil.cpu_percent()}% | <b>Free</b> → {size(disk.free)}\n'
+                f'┟ <b>Available for new files</b> → {size(resources.free)} · Reserved → {size(resources.reserved)}\n'
+                f'┖ <b>RAM</b> → {psutil.virtual_memory().percent}% | <b>Uptime</b> → {duration(time.time()-self.runtime.started)}')
 
     def visible(self, view):
         uid = view['user'] if view['me'] or view['user'] != self.runtime.config.owner_id else None

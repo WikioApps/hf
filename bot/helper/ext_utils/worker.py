@@ -46,6 +46,8 @@ def drive(url, output, limit):
 def main():
     mode,*args = sys.argv[1:]
     payload = json.loads(sys.stdin.readline() or '{}')
+    from bot.helper.ext_utils import files_utils
+    files_utils.DISK_RESERVE = int(payload.get('_disk_reserve_bytes',512*1024**2))
     if payload.get('_memory_limit_bytes'):
         import resource
         budget=int(payload['_memory_limit_bytes'])
@@ -54,7 +56,7 @@ def main():
     logging.info('Worker started operation=%s',mode)
     if mode in ('catalog','media','mega','drive'):
         from bot.helper.ext_utils.network_utils import guard_worker_requests
-        guard_worker_requests()
+        guard_worker_requests(media=mode in ('catalog','media'))
     if mode == 'catalog':
         from bot.helper.mirror_leech_utils.download_utils.media_download import catalog
         result = catalog(payload['url'],payload.get('engine','media'),payload.get('limit',1000))

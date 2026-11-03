@@ -3,7 +3,7 @@ import shlex
 import time
 import uuid
 from html import escape
-from telethon import Button
+from bot.helper.telegram_helper.button import Button
 from bot.helper.ext_utils.files_utils import filename, safe_path
 
 

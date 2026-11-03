@@ -10,7 +10,7 @@ A Telegram bot that downloads files and sends them to your Hugging Face account.
 - Runs multiple downloads and uploads for the same user. The owner chooses separate concurrency limits; the default is four of each.
 - Extracts members one at a time while completed members upload concurrently. A bounded pipeline limits prepared files, reserves disk space and checks available memory. Confirmed uploads are saved before their local file is deleted. Optional archive selection, ZIP creation and 7Z creation are supported.
 - Shows task type, concurrent transfer phases, recent byte speed, ETA and cancellation commands. HF uses instrumented HTTP uploads so native Xet cannot bypass the progress counter. Status views contain refresh and pagination controls and disappear when their visible tasks finish.
-- Stores user access, destinations, task records, confirmed uploads, archive manifests and Telegram sessions in MongoDB. Failed transfers retain local files for retry.
+- Stores user access, destinations, task records, confirmed uploads, archive manifests and Telegram sessions in MongoDB. Failed transfers retain local files for a short retry window (15 minutes by default). Cancelled tasks remove their local files as soon as workers stop.
 - Provides a responsive website with private transfer history, live activity and owner access controls. Public statistics are optional and contain counts only.
 - Registers Telegram commands automatically. Includes owner-only Speedtest.net results with the provider’s share image and detailed server statistics, plus `/logs` for the current application log.
 
@@ -112,10 +112,10 @@ For MongoDB Atlas, create a database user with read/write access to this applica
 | `/mirror URL` | Download and upload a link. Reply to a file with `/mirror` to use that file. |
 | `/usettings` | Your HF token, account, repository, branch, folder and file behavior. Private chat only. |
 | `/status`, `/status me` | Active transfers in this chat; the owner can see all users in the chat. |
-| `/cancel ID` | Stop a transfer and retain its files. Without an ID, close a settings prompt. |
+| `/cancel ID` | Stop a transfer and delete its local files. Without an ID, close a settings prompt. |
 | `/retry ID` | Retry an interrupted, failed or cancelled task. |
 | `/select ID` | Reopen a pending archive selection menu. |
-| `/history` | Recent transfers and completion links. The owner sees all users. |
+| `/history` | Private recent transfers, completion links and a Clear finished history button. The owner sees all users. |
 | `/clean ID` | Remove retained local files for a finished task. Remote uploads remain. |
 | `/sites` | Public hosts, video sites and galleries, with a link to support details. |
 | `/stats` | CPU, memory, storage and current transfer counts. |
@@ -171,13 +171,19 @@ Download and upload counts are separate. Queueing begins only when a configured 
 
 The default is four download slots, four upload slots and three files in each preparation pipeline. Multiple tasks from the same user can run together. Extraction itself is limited to one worker globally; extracted members can upload concurrently, and the next member can extract while uploads continue. Collection downloads overlap uploads within the same limits. A collection containing archives also shares a per-task extracted-member limit.
 
-Disk reservations account for expected bytes that have not been written yet, so simultaneous downloads cannot all claim the same free space. The default disk floor is 1 GiB. Unknown-length downloads receive a fixed budget based on remaining capacity and the file-size limit; exceeding it stops that task with an error. Video downloads reserve space for merging. Failed and cancelled files continue to occupy real disk until retried or removed with `/clean`.
+Disk accounting uses allocated blocks, so a sparse aria2 file does not falsely count as fully downloaded. Known-size files reserve their unwritten bytes. Unknown-size streams reserve a rolling 32 MiB window instead of the entire file limit. Download reservations are released before extraction or upload; actual downloaded bytes already count in filesystem usage. The default disk floor is 1 GiB. Runtime guards stop a growing transfer if the remaining space belongs to other jobs or the safety reserve. Unknown-size streams and video merging still need enough real storage to finish; checks do not create extra capacity.
+
+`/stats` shows physical free space, reservations and space available for new files separately. Small public HTTP files (up to 16 MiB, with a known response length) stream directly in the bot without starting aria2. Larger or unknown-length responses keep the aria2 engine. Google Drive workers avoid loading the video extractor when it is not needed; host-side quotas and response times still apply.
 
 Admission checks use available RAM, including Linux container memory limits. Child-worker memory is monitored; an over-budget worker is terminated within its task. New work can show **Wait** while existing uploads free space. A resource wait expires after 15 minutes with instructions to clean files or lower concurrency. These limits reduce exhaustion risk; they cannot guarantee survival if the host kills the whole service or external processes consume its resources.
 
 An uploaded file is deleted only after HF confirms it and the result is saved in MongoDB. A local upload receipt covers the gap between commit and bookkeeping. Archive sources remain until their selected members finish; retry can skip confirmed members. A failure inside one collection stops that collection's remaining children, not unrelated tasks.
 
 For a small host, use two downloads, two uploads and two prepared files in `/botsettings`. Start with 2 GiB RAM and enough disk for input archives, their largest concurrent members and the disk floor. The image build also needs space for dependencies and helper binaries.
+
+## Telegram button colors
+
+The pinned Telethon 1.45.0 release supports Telegram’s native button styles. Upload, retry and authorization actions use green; cancellation, cleanup, blocking and history deletion use red; main navigation uses blue. Back/close controls stay neutral. Older Telegram clients may render the default style. See [Telegram button styles](https://core.telegram.org/api/bots/buttons).
 
 ## Website and health checks
 
@@ -195,7 +201,9 @@ Use the exact HTTPS origin in **Website URL**. Browser changes from another orig
 
 MongoDB is the source of truth. User records, owner settings, task sources, archive manifests, confirmed upload results, the Telegram session and portal sessions are stored there. Large archive manifests and results use separate collections to avoid MongoDB's document-size limit.
 
-Downloaded bytes live in a sibling directory named `hf-data`: on the observed InstaPods layout this is `/home/instapod/hf-data`, outside `/home/instapod/app`. Successful tasks remove their working files. Failed/cancelled tasks remain until `/retry` or `/clean`. MongoDB does **not** store downloaded file contents.
+Downloaded bytes live in a sibling directory named `hf-data`: on the observed InstaPods layout this is `/home/instapod/hf-data`, outside `/home/instapod/app`. Successful tasks remove their working files. Cancelled tasks remove local files immediately after their child processes stop. Failed/interrupted files expire after 15 minutes by default; choose 0, 15 or 60 minutes in `/botsettings`. Cleanup runs every minute and also removes old cancelled/completed folders left by previous versions. MongoDB stores records and settings, **not** downloaded file contents. Moving multi-gigabyte payloads into MongoDB would increase database storage and transfer costs.
+
+Finished task history, upload records and archive manifests expire together after seven days (owner choices: 1, 7 or 30 days). User settings, tokens and access rules do not expire with history. **Clear finished history** in `/history` or the private portal removes all finished records in your scope and their retained local files in one action; the owner clears all users. It never cancels active tasks, deletes forwarded Telegram messages, or deletes Hugging Face files. After clearing or expiry, those task IDs can no longer be retried.
 
 After a restart, unfinished records become **Interrupted**. `/retry` uses retained files where present, otherwise downloads the original source again. Confirmed archive uploads are skipped. A host failure immediately after a remote commit but before its MongoDB record is saved can produce a duplicate on retry under the rename policy.
 
@@ -249,15 +257,15 @@ Stop the old bot before starting a second host. Keep MongoDB and credentials sta
 
 ## Source layout
 
-See [docs/architecture.md](docs/architecture.md) for the complete file tree and module responsibilities. Bot commands, transfer engines, persistence and website assets are kept in separate folders. There is no committed test suite or Docker configuration.
+See [docs/architecture.md](docs/architecture.md) for the complete file tree and module responsibilities. Bot commands, transfer engines, persistence and website assets are kept in separate folders. There is no committed test suite. Docker packaging is optional; both deployment modes use the same application.
 
 ## Validation and limits
 
-This revision was built in a fresh Python 3.12 virtual environment. Local checks covered syntax/imports, shell and JavaScript syntax, real MongoDB reads/writes and leases, encrypted values, portal authentication and authorization, real aria2 HTTP downloads, and real ZIP/7Z/TAR-family extraction, RAR member extraction and link rejection, concurrent same-user task handling, automatic status deletion, and Uvicorn startup/shutdown on a dynamic port. Lease handover, concurrent acquisition, server-clock expiry, heartbeat renewal during startup, and cancellation while waiting were checked against a real local MongoDB instance. Launcher checks cover `.venv` only, `venv` only, incomplete `.venv` with a complete `venv`, the platform activating the wrong environment, and a supported active environment outside the checkout. These include actual startup from the auto-detected activation command without a build-created `.venv`. This update also checked Telethon filename normalization, ZIP operations without 7-Zip, a real HTTP download with Content-Disposition followed by extraction, settings-menu replacement, log redaction/access controls, and Speedtest photo/text delivery paths. Telegram/HF/Speedtest delivery was isolated where credentials or provider access were unavailable. These checks were run outside the repository.
+Previous revisions were built in a fresh Python 3.12 virtual environment. Local checks covered syntax/imports, shell and JavaScript syntax, real MongoDB reads/writes and leases, encrypted values, portal authentication and authorization, real aria2 HTTP downloads, and real ZIP/7Z/TAR-family extraction, RAR member extraction and link rejection, concurrent same-user task handling, automatic status deletion, and Uvicorn startup/shutdown on a dynamic port. Lease handover, concurrent acquisition, server-clock expiry, heartbeat renewal during startup, and cancellation while waiting were checked against a real local MongoDB instance. Launcher checks cover `.venv` only, `venv` only, incomplete `.venv` with a complete `venv`, the platform activating the wrong environment, and a supported active environment outside the checkout. These include actual startup from the auto-detected activation command without a build-created `.venv`. This update also checked Telethon filename normalization, ZIP operations without 7-Zip, a real HTTP download with Content-Disposition followed by extraction, settings-menu replacement, log redaction/access controls, and Speedtest photo/text delivery paths. Telegram/HF/Speedtest delivery was isolated where credentials or provider access were unavailable. These checks were run outside the repository.
 
 The Python 3.12 container build was also checked locally, including native helper execution, UID/GID 10001, writable data storage, dynamic HTTP port, missing-configuration errors, readiness before initialization, and SIGTERM shutdown. The local build used a temporary certificate mount for this workspace’s network proxy; no proxy certificate is stored in the shipped Dockerfile or image.
 
-This update additionally checks real HTTP LFS byte reporting after early Hub imports, actual overlapping ZIP extraction/uploads, prompt deletion, same-user collections through real aria2, cancellation isolation, competing disk reservations, zero-byte archive members, MEGA integrity boundaries and rejection of corrupt ciphertext, Drive folder paths, and a generated HLS stream through the bundled media tools. Public GitHub file and Internet Archive item resolution were checked live. Provider response fixtures cover parsing behavior, not a guarantee of live availability.
+The preceding provider update checked real HTTP LFS byte reporting after early Hub imports, actual overlapping ZIP extraction/uploads, prompt deletion, same-user collections through real aria2, cancellation isolation, competing disk reservations, zero-byte archive members, MEGA integrity boundaries and rejection of corrupt ciphertext, Drive folder paths, and a generated HLS stream through the bundled media tools. Public GitHub file and Internet Archive item resolution were checked live. Provider response fixtures cover parsing behavior, not a guarantee of live availability.
 
 Live Telegram authentication, real HF commits, all host-specific websites, Speedtest.net and your actual InstaPods or Orkestr deployment require your credentials and network. A successful local build is not a verified production deployment. Archive support depends on the installed engine and the specific archive, and hosting storage/bandwidth limits still apply.
 

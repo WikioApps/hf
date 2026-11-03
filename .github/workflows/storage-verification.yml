@@ -1,0 +1,203 @@
+name: Storage regression verification
+on:
+  push:
+    branches: [verify/storage-cleanup]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      mongo:
+        image: mongo:7
+        ports: ['27017:27017']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build Python runtime
+        run: sh build.sh --build
+      - name: Syntax checks
+        run: |
+          sh -n build.sh start.sh
+          node --check web/frontend/app.js
+      - name: Verify storage, cleanup, small downloads and buttons
+        run: |
+          .venv/bin/python - <<'PY'
+          import asyncio
+          import logging
+          import tempfile
+          from datetime import datetime, timedelta, timezone
+          from pathlib import Path
+          from types import SimpleNamespace
+          from unittest.mock import AsyncMock, patch
+          
+          from bot.core.settings import BOT_DEFAULTS
+          from bot.helper.ext_utils.db_handler import Database
+          from bot.helper.ext_utils.task_manager import TaskManager
+          from bot.helper.ext_utils.resource_manager import ResourceManager, Reservation, GIB, MIB
+          from bot.helper.mirror_leech_utils.status_utils.task_status import TaskStatus
+          from bot.helper.mirror_leech_utils.download_utils import http_download
+          from bot.helper.telegram_helper.button import Button
+          from web.backend.application import create_app
+          import httpx
+          
+          def make_task(root, uid=2, phase='QueueDl'):
+              task = TaskStatus(uid,uid,1,{'kind':'url','url':'https://example.org/file.bin'},
+                                {'namespace':'example','repo_name':'files','repo_type':'model',
+                                 'branch':'main','path':'','private':True,'collision':'rename'},
+                                {'processing':'none'},root)
+              task.directory = root/'tasks'/task.id
+              task.directory.mkdir(parents=True)
+              task.phase = phase
+              return task
+          
+          async def main():
+              with tempfile.TemporaryDirectory() as tmp:
+                  root = Path(tmp)
+                  config = SimpleNamespace(data=root,api_hash='a'*32,bot_id='900000001',
+                                           owner_id=1,database_url='mongodb://127.0.0.1:27017/hf_checks')
+                  db = Database(config)
+                  await db.connect()
+                  runtime = SimpleNamespace(config=config,db=db,settings=dict(BOT_DEFAULTS),
+                      logger=logging.getLogger('check'),failed=AsyncMock(),completed=AsyncMock(),
+                      status=SimpleNamespace(refresh_all=AsyncMock()),healthy=lambda:True)
+                  runtime.manager = manager = TaskManager(runtime)
+                  await db.user(2,'Example user')
+                  try:
+                      probe = make_task(root)
+                      resources = ResourceManager(root,lambda:runtime.settings)
+                      disk = SimpleNamespace(total=40*GIB,used=19*GIB,free=21*GIB)
+                      with patch('bot.helper.ext_utils.resource_manager.shutil.disk_usage',return_value=disk):
+                          unknown = await resources.storage(probe,probe.directory/'unknown',0,20*GIB)
+                          assert unknown.dynamic and unknown.remaining == 32*MIB
+                          large = await resources.storage(probe,probe.directory/'large',10*GIB,20*GIB)
+                          assert resources.free > 9*GIB
+                          await resources.release(unknown)
+                          await resources.release(large)
+                          sparse = probe.directory/'sparse'
+                          with sparse.open('wb') as output:
+                              output.truncate(GIB)
+                          assert Reservation(sparse,GIB).remaining > GIB-1024*1024
+                          sparse.unlink()
+                      print('PASS 21 GiB free admits a 10 GiB file alongside an unknown-size stream; sparse accounting')
+          
+                      body = b'x'*(2*MIB)
+                      async def serve(reader,writer):
+                          try:
+                              await reader.readuntil(b'\r\n\r\n')
+                              writer.write(b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(body)).encode()+b'\r\nConnection: close\r\n\r\n'+body)
+                              await writer.drain()
+                          finally:
+                              writer.close()
+                              await writer.wait_closed()
+                      server = await asyncio.start_server(serve,'127.0.0.1',0)
+                      port = server.sockets[0].getsockname()[1]
+                      small = make_task(root)
+                      small.resource_manager = manager.resources
+                      small.storage_lease = await manager.resources.storage(small,small.directory/'source',0,20*GIB)
+                      info = {'engine':'aria2','url':f'http://127.0.0.1:{port}/tiny.bin','name':'tiny.bin','total':0}
+                      try:
+                          with patch.object(http_download,'public_url',new=AsyncMock()):
+                              assert await http_download.download(small,info,{**runtime.settings,'byte_limit':20*GIB})
+                          assert (small.directory/'source').read_bytes() == body
+                      finally:
+                          server.close()
+                          await server.wait_closed()
+                          await manager.resources.release(small.storage_lease)
+                      print('PASS real 2 MiB HTTP stream, byte count and output integrity')
+          
+                      ready = make_task(root)
+                      ready.resource_manager = manager.resources
+                      async def fake_http(task,info,settings):
+                          (task.directory/'source').write_bytes(b'complete')
+                          return True
+                      with patch.object(http_download,'download',new=fake_http):
+                          await manager.download(ready,ready,{'engine':'aria2','url':'https://example.org/file','total':0})
+                      assert not manager.resources.reservations
+                      assert ready.storage_lease is None
+                      print('PASS unknown-size download releases headroom before extraction/upload')
+          
+                      for action,field in [('upload','bg_success'),('cancel','bg_danger'),('refresh','bg_primary')]:
+                          button=Button.inline(action,'file:key:'+action)
+                          assert getattr(button.style,field) and bytes(button)
+                      assert Button.inline('Back','cfg:2:user:back').style is None
+                      assert bytes(Button.url('Open','https://example.org'))
+                      print('PASS native Telethon 1.45 button styles serialize')
+          
+                      foreign = make_task(root,3,'Failed')
+                      finished = make_task(root,2,'Complete')
+                      active = make_task(root,2,'Download')
+                      manager.tasks[active.id] = active
+                      for task in (foreign,finished,active):
+                          (task.directory/'source').write_bytes(b'keep')
+                          task.results = [{'source_name':'x','url':'https://huggingface.co/example/file','size':4}]
+                          task.members = [{'name':'x','size':4}]
+                          await manager.save(task)
+                      assert await manager.clear_history(2) >= 1
+                      assert not finished.directory.exists()
+                      assert foreign.directory.exists() and active.directory.exists()
+                      assert await db.task(finished.id) is None
+                      assert not await db.db.uploads.count_documents({'bot':db.scope,'task':finished.id})
+                      assert not await db.db.manifests.count_documents({'bot':db.scope,'task':finished.id})
+                      assert await db.db.users.count_documents({'bot':db.scope,'user_id':2}) == 1
+                      print('PASS history clear respects ownership and active jobs, removes all child records, retains settings')
+          
+                      await db.db.tasks.update_one({'_id':foreign.id},{'$set':{'updated':datetime.now(timezone.utc)-timedelta(hours=1)}})
+                      await manager.maintenance.sweep()
+                      assert not foreign.directory.exists()
+                      assert await db.task(foreign.id)
+                      await db.db.tasks.update_one({'_id':foreign.id},{'$set':{'updated':datetime.now(timezone.utc)-timedelta(days=8)}})
+                      await manager.maintenance.sweep()
+                      assert await db.task(foreign.id) is None
+                      assert active.directory.exists()
+                      print('PASS failed-file expiry and history expiry preserve active work')
+          
+                      entered = asyncio.Event()
+                      exited = asyncio.Event()
+                      async def transfer(task):
+                          (task.directory/'source').write_bytes(b'partial')
+                          entered.set()
+                          try:
+                              await asyncio.Event().wait()
+                          finally:
+                              exited.set()
+                      manager.transfer = transfer
+                      cancel = make_task(root)
+                      manager.tasks[cancel.id] = cancel
+                      cancel.runner = asyncio.create_task(manager.run(cancel))
+                      await entered.wait()
+                      await manager.cancel(cancel.id,2)
+                      assert exited.is_set() and not cancel.directory.exists()
+                      assert (await db.task(cancel.id))['phase'] == 'Cancelled'
+                      queued = make_task(root)
+                      manager.tasks[queued.id] = queued
+                      queued.runner = asyncio.create_task(manager.run(queued))
+                      await manager.cancel(queued.id,2)
+                      assert not queued.directory.exists()
+                      assert (await db.task(queued.id))['phase'] == 'Cancelled'
+                      assert active.directory.exists()
+                      print('PASS running and pre-start cancellation clean files without affecting another task')
+          
+                      runtime.settings['base_url']='https://bot.example'
+                      app = create_app(runtime)
+                      raw = await db.issue_session(2,'web')
+                      async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='https://bot.example') as client:
+                          result = await client.post('/api/action',json={'action':'clear_history'},headers={'origin':'https://bot.example'})
+                          assert result.status_code == 401
+                          client.cookies.set('hf_session',raw)
+                          result = await client.post('/api/action',json={'action':'clear_history'},headers={'origin':'https://evil.example'})
+                          assert result.status_code == 403
+                          result = await client.post('/api/action',json={'action':'clear_history'},headers={'origin':'https://bot.example'})
+                          assert result.status_code == 200
+                      assert active.directory.exists()
+                      print('PASS portal history deletion requires session, authorization and matching origin')
+                  finally:
+                      await db.client.drop_database('hf_checks')
+                      await db.close()
+          
+          asyncio.run(main())
+          
+          PY

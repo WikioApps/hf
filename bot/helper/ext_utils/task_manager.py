@@ -11,9 +11,10 @@ from bot.helper.ext_utils.log_utils import redact, register_secrets
 from bot.helper.ext_utils.files_utils import filename, safe_path, check_space
 from bot.helper.ext_utils.process_utils import run_worker
 from bot.helper.mirror_leech_utils.status_utils.task_status import TaskStatus, TERMINAL
-from bot.helper.mirror_leech_utils.download_utils import aria2_download, telegram_download
+from bot.helper.mirror_leech_utils.download_utils import aria2_download, telegram_download, http_download
 from bot.helper.mirror_leech_utils.download_utils.direct_link_generator import resolve, refresh_item
 from bot.helper.ext_utils.resource_manager import ResourceManager
+from bot.helper.ext_utils.cleanup import Maintenance
 
 
 class Slots:
@@ -51,6 +52,7 @@ class TaskManager:
         self.submissions = asyncio.Lock()
         self.result_locks = WeakValueDictionary()
         self.resources = ResourceManager(runtime.config.data,lambda:runtime.settings)
+        self.maintenance = Maintenance(self)
 
     def active(self, uid=None, chat=None):
         return [t for t in self.tasks.values() if t.phase not in TERMINAL
@@ -130,8 +132,17 @@ class TaskManager:
         task = await self.find(tid,uid)
         if not isinstance(task,TaskStatus) or not task.runner or task.runner.done():
             raise ValueError('The task is not running.')
-        task.runner.cancel()
+        if not task.runner.cancelling():
+            task.runner.cancel()
         await asyncio.gather(task.runner,return_exceptions=True)
+        # A coroutine cancelled before its first step never enters run()'s finally.
+        if task.phase not in TERMINAL:
+            task.phase = 'Cancelled'
+            task.error = 'Transfer cancelled. Local files were removed; retry downloads the source again.'
+            await self.clean_local(task)
+            await self.finish_error(task)
+            self.tasks.pop(task.id,None)
+            await self.runtime.status.refresh_all()
 
     async def run(self, task):
         try:
@@ -140,14 +151,16 @@ class TaskManager:
             task.lanes.clear()
             task.phase = 'Complete'
             await self.save(task)
-            self.clean_local(task)
+            await self.clean_local(task)
             try:
                 await self.runtime.completed(task)
             except Exception:
                 self.runtime.logger.exception('Completion message could not be sent task=%s',task.id)
         except asyncio.CancelledError:
             task.phase = 'Interrupted' if self.closing else 'Cancelled'
-            task.error = 'Transfer stopped. Confirmed uploads are kept; remaining files can be retried.'
+            task.error = 'Transfer stopped. Local temporary files were removed. Retry downloads the source again; confirmed HF uploads are kept.' if not self.closing else 'Host stopped. Retry can resume retained files before their cleanup deadline.'
+            if not self.closing:
+                await self.clean_local(task)
             await self.finish_error(task)
         except Exception as error:
             self.runtime.logger.exception('Task failed task=%s phase=%s file=%s',task.id,task.phase,task.name)
@@ -155,6 +168,8 @@ class TaskManager:
             task.error = redact(str(error)) if type(error) is ValueError else type(error).__name__+': transfer failed. Details were saved for /logs.'
             await self.finish_error(task)
         finally:
+            if task.phase in ('Complete','Cancelled') or self.runtime.settings.get('failed_file_minutes',15) == 0:
+                await self.clean_local(task)
             self.selection_events.pop(task.id,None)
             task.lanes.clear()
             try:
@@ -275,6 +290,7 @@ class TaskManager:
             lease=await self.resources.storage(child,source_file,total*factor,self.max_file*factor)
             limit=min(self.max_file,lease.size//factor)
             settings={**self.runtime.settings,'byte_limit':limit}
+            child.storage_lease = lease
             try:
                 if info is None and child.source['kind']=='telegram':
                     await telegram_download.download(child,self.runtime.client,settings)
@@ -289,7 +305,8 @@ class TaskManager:
                     child.stage('Download');child.engine='MEGA AES-CTR'
                     await run_worker(child,'mega',[source_file,limit],secret={'info':info})
                 else:
-                    await aria2_download.download(child,info,settings)
+                    if not await http_download.download(child,info,settings):
+                        await aria2_download.download(child,info,settings)
                 if not source_file.is_file():
                     raise ValueError('The download engine did not create a complete local file.')
                 if source_file.stat().st_size>limit:
@@ -299,6 +316,10 @@ class TaskManager:
                 if child is task:
                     task.downloaded=True
                     await self.save(task)
+                # Downloaded bytes are already included in disk_usage. Release unused
+                # unknown-size / merge headroom before extraction or upload starts.
+                await self.resources.release(lease)
+                child.storage_lease = None
                 return lease
             except BaseException:
                 await self.resources.release(lease)
@@ -406,15 +427,22 @@ class TaskManager:
         finally:
             await self.resources.release(lease)
 
-    def clean_local(self, task):
-        shutil.rmtree(task.directory,ignore_errors=True)
+    async def clean_local(self, task):
+        await self.maintenance.remove_local(task.id)
 
     async def clean(self, tid, uid):
         data = await self.find(tid,uid)
         phase = data.phase if isinstance(data,TaskStatus) else data['phase']
         if phase not in TERMINAL:
             raise ValueError('Cancel the task before cleaning local files.')
-        shutil.rmtree(self.runtime.config.data/'tasks'/tid,ignore_errors=True)
+        async with self.submissions:
+            current = self.tasks.get(tid)
+            if current and current.runner and not current.runner.done():
+                raise ValueError('The task is still stopping. Try again shortly.')
+            await self.maintenance.remove_local(tid)
+
+    async def clear_history(self, uid):
+        return await self.maintenance.clear_history(uid)
 
     async def close(self):
         self.closing = True

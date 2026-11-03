@@ -1,5 +1,6 @@
 import logging
 from bot.helper.ext_utils.files_utils import check_space, filename
+from bot.helper.ext_utils.resource_manager import allocated
 
 LOGGER = logging.getLogger(__name__)
 
@@ -18,10 +19,15 @@ async def download(task, client, settings):
     task.engine = 'Telegram MTProto'
     task.stage('Download',total)
 
+    reserve = settings.get('disk_reserve_mb',1024)*1024**2
+
     def progress(done, expected):
         if done > limit:
             raise ValueError('The Telegram file exceeds the configured size limit.')
-        check_space(task.directory)
+        check_space(task.directory,reserve=reserve)
+        manager = getattr(task,'resource_manager',None)
+        lease = getattr(task,'storage_lease',None)
+        if manager and lease: manager.check(lease)
         task.done,task.total = done,int(expected or total)
 
     path = task.directory/'source'
@@ -31,7 +37,7 @@ async def download(task, client, settings):
         task.done = total
         LOGGER.info('Recovered completed legacy Telegram download task=%s bytes=%s',task.id,total)
         return path
-    check_space(task.directory,total)
+    check_space(task.directory,max(0,total-allocated(path)),reserve=reserve)
     # Passing a stream prevents Telethon appending .mkv/.zip to our internal path.
     with path.open('wb') as output:
         await client.download_media(message,file=output,progress_callback=progress)

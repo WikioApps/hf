@@ -93,6 +93,8 @@ def create_app(runtime):
             import re
             if not re.fullmatch('[a-f0-9]{12}',tid): raise ValueError('Invalid task ID.')
             await getattr(runtime.manager,command)(tid,uid)
+        elif command == 'clear_history':
+            await runtime.manager.clear_history(uid)
         elif uid == runtime.config.owner_id and command == 'setting':
             key = data.get('key')
             if key not in BOT_DEFAULTS: raise ValueError('Unknown setting.')
