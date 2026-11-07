@@ -9,6 +9,7 @@ import asyncio
 from contextlib import contextmanager, suppress
 from html import escape
 import io
+import logging
 from os import environ, path as ospath, walk
 from pathlib import Path, PurePosixPath
 from re import compile as re_compile, sub as re_sub
@@ -118,18 +119,15 @@ def _reader_hook():
     """Reuse the instrumented HTTP-upload mechanism in WikioApps/hf.
 
     The hook is process-wide but paths have independent reporting callbacks.
-    If the pinned Hub version changes, uploads continue without fake progress.
+    Keep the Hub's native Xet transport enabled when available: it handles
+    chunking, deduplication and retries. The hook tracks legacy LFS reads.
     """
     global _HF_HOOKED
     with _HF_READ_LOCK:
         if _HF_HOOKED:
             return
-        environ.setdefault("HF_HUB_DISABLE_XET", "1")
-        environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
         try:
-            from huggingface_hub import _commit_api, constants
-            constants.HF_HUB_DISABLE_XET = True
-            constants.HF_HUB_ENABLE_HF_TRANSFER = False
+            from huggingface_hub import _commit_api
         except (ImportError, AttributeError):
             return
         original = getattr(_commit_api, "_wzmlx_hf_original_tqdm_stream", None)
@@ -186,6 +184,68 @@ def _unique_remote(api, repo, typ, branch, remote, collision):
     raise ValueError("Too many files with the same name in the destination")
 
 
+def _exception_chain(error):
+    """Unwrap the generic LFS RuntimeError to its meaningful original cause."""
+    seen = set()
+    current = error
+    while current and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+def _reason(error):
+    causes = list(_exception_chain(error))
+    source = causes[-1]
+    status = getattr(getattr(source, "response", None), "status_code", None)
+    detail = str(source).strip().replace("\n", " ")
+    # Presigned upload URLs and credentials must not be printed in Telegram.
+    detail = re_sub(r"https?://[^\s]+", "[remote URL]", detail)
+    detail = re_sub(r"hf_[A-Za-z0-9]{10,}", "[HF token]", detail)
+    detail = re_sub(r"\s+", " ", detail)
+    if len(detail) > 260:
+        detail = detail[:257] + "..."
+    return f"{type(source).__name__}{f' HTTP {status}' if status else ''}: {detail or 'Unknown upload error'}"
+
+
+def _retryable(error):
+    causes = list(_exception_chain(error))
+    for cause in causes:
+        code = getattr(getattr(cause, "response", None), "status_code", None)
+        if code is not None:
+            return code in (408, 409, 425, 429, 500, 502, 503, 504)
+    if any(isinstance(cause, (TimeoutError, ConnectionError)) for cause in causes):
+        return True
+    try:
+        from requests.exceptions import ConnectionError as RequestConnectionError, Timeout as RequestTimeout
+        if any(isinstance(cause, (RequestConnectionError, RequestTimeout)) for cause in causes):
+            return True
+    except ImportError:
+        pass
+    combined = " ".join(str(cause).lower() for cause in causes)
+    return any(word in combined for word in (
+        "timed out", "timeout", "connection reset", "connection aborted",
+        "remote disconnected", "broken pipe", "temporarily unavailable",
+        "service unavailable", "connection closed", "error while uploading",
+    ))
+
+
+def _hf_attempt(operation, label, remote, maximum=4):
+    """Retry transient upload failures without masking permanent HF errors."""
+    from time import sleep
+    for attempt in range(1, maximum + 1):
+        try:
+            return operation()
+        except Exception as error:
+            if attempt == maximum or not _retryable(error):
+                raise
+            LOGGER.warning(
+                "HF %s retry %d/%d for %s: %s",
+                label, attempt, maximum, remote, _reason(error),
+            )
+            sleep(min(2 ** attempt, 15))
+
+
 def _upload_files(listener, records, repo_folder, cfg, destination):
     """Run blocking HF operations outside the bot event loop."""
     from huggingface_hub import CommitOperationAdd, HfApi
@@ -230,23 +290,18 @@ def _upload_files(listener, records, repo_folder, cfg, destination):
         operation = CommitOperationAdd(path_in_repo=remote, path_or_fileobj=full_path)
         _HF_READS[full_path] = report
         try:
-            api.preupload_lfs_files(
-                repo, [operation], repo_type=typ, revision=branch, num_threads=1,
+            _hf_attempt(
+                lambda: api.preupload_lfs_files(
+                    repo, [operation], repo_type=typ, revision=branch, num_threads=1,
+                ), "pre-upload", remote,
             )
             listener.hf_phase = "Committing to HF"
-            for attempt in range(4):
-                try:
-                    api.create_commit(
-                        repo_id=repo, repo_type=typ, revision=branch,
-                        operations=[operation], commit_message=f"Upload {remote} from WZML-X",
-                    )
-                    break
-                except Exception as error:
-                    code = getattr(getattr(error, "response", None), "status_code", None)
-                    if code not in (409, 429, 502, 503) or attempt == 3:
-                        raise
-                    from time import sleep
-                    sleep(2**attempt)
+            _hf_attempt(
+                lambda: api.create_commit(
+                    repo_id=repo, repo_type=typ, revision=branch,
+                    operations=[operation], commit_message=f"Upload {remote} from WZML-X",
+                ), "commit", remote,
+            )
             uploaded += 1
             transferred += length
             listener._report(transferred)
@@ -315,8 +370,10 @@ class HFMirror(Mirror):
         self._hf_started = False
 
     async def before_start(self):
-        # Mirror's parser provides -up for a destination; here it means HF folder.
-        self.hf_folder = _folder(self.up_dest or _cfg().get("folder", ""))
+        # -up overrides HF_FOLDER; otherwise use the host variable or the
+        # plugin's folder setting. Never use the local download directory.
+        configured = environ.get("HF_FOLDER") if "HF_FOLDER" in environ else _cfg().get("folder", "")
+        self.hf_folder = _folder(self.up_dest or configured)
         if self.category:
             raise ValueError("-gc is for Google Drive. Use -up HF_FOLDER for Hugging Face.")
         self.up_dest = "hf:"
@@ -424,14 +481,14 @@ class HFMirror(Mirror):
                 item = Path(folder) / name
                 if item.is_symlink() or not item.is_file():
                     continue
-                records.append((item, item.relative_to(root).as_posix()))
+                # Flatten archive subdirectories. The destination is exactly
+                # the configured HF folder, not the extracted archive tree.
+                records.append((item, item.name))
                 if len(records) > limit:
                     raise ValueError(f"Archive has more than {limit} files; increase max_files in plugin Settings")
         if not records:
             raise ValueError("Archive/folder contains no uploadable files")
-        # Use the original directory name to keep this upload's remote file list isolated.
-        prefix = "/".join(x for x in (self.hf_folder, path.name) if x)
-        return sorted(records, key=lambda x: x[1].casefold()), prefix
+        return sorted(records, key=lambda x: (x[1].casefold(), str(x[0]))), self.hf_folder
 
     async def on_download_complete(self):
         """Normal WZML download callback, but route upload to HF."""
@@ -517,9 +574,9 @@ class HFMirror(Mirror):
         except asyncio.CancelledError:
             await self._finish()
         except Exception as error:
-            LOGGER.error("HF native mirror failed: %s", error, exc_info=True)
+            LOGGER.error("HF native mirror failed: %s", _reason(error), exc_info=True)
             if not self.is_cancelled:
-                await self.on_upload_error(str(error))
+                await self.on_upload_error(f"Hugging Face upload failed — {_reason(error)}")
             else:
                 await self._finish()
 
