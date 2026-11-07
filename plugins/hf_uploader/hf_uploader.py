@@ -6,9 +6,12 @@ Requires HF_TOKEN in the WZML-X host environment; other settings live in
 """
 
 import asyncio
-from contextlib import contextmanager
 from html import escape
-from io import BufferedReader, FileIO
+from contextlib import contextmanager
+import io
+from time import monotonic, time
+from types import SimpleNamespace
+from threading import Lock
 import ipaddress
 import os
 from pathlib import Path, PurePosixPath
@@ -18,14 +21,12 @@ import shlex
 import shutil
 import socket
 import tempfile
-from time import monotonic, time
-from types import SimpleNamespace
 from urllib.parse import quote, unquote, urljoin, urlsplit
 
 from aiohttp import ClientSession, ClientTimeout
-from pyrogram.enums import ButtonStyle, ChatType
+from pyrogram.enums import ChatType
 
-from bot import DOWNLOAD_DIR, LOGGER, task_dict, task_dict_lock
+from bot import DOWNLOAD_DIR, LOGGER, task_dict, task_dict_lock, intervals
 from bot.core.plugin_manager import PluginBase, get_plugin_manager
 from bot.core.tg_client import TgClient
 from bot.helper.ext_utils.status_utils import (
@@ -33,149 +34,184 @@ from bot.helper.ext_utils.status_utils import (
 )
 from bot.helper.telegram_helper.button_build import ButtonMaker
 from bot.helper.telegram_helper.message_utils import (
-    delete_status, send_message, send_status_message, update_status_message,
+    send_message, send_status_message, update_status_message, delete_status,
 )
 
 
 JOBS = {}
-_UPLOAD_FILES = {}
-_PROGRESS_HOOK_INSTALLED = False
-DEFAULT_GB = 1024**3
-SAFE_REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
-FILE_MEDIA = ("document", "video", "audio", "animation", "voice", "video_note", "photo")
+_HF_PROGRESS = {}
+_HF_STREAM_PATCHED = False
+_HF_HOOK_LOCK = Lock()
 
 
+def _rate(job):
+    """Update a smoothed transfer rate without misleading negative speeds."""
+    now = monotonic()
+    then = job.get("rate_at", now)
+    if now - then >= 0.8:
+        previous = job.get("rate_done", 0)
+        amount = max(0, job["done"] - previous)
+        instant = amount / max(0.001, now - then)
+        job["bytes_per_second"] = instant if not job.get("bytes_per_second") else (
+            0.65 * job["bytes_per_second"] + 0.35 * instant
+        )
+        job["rate_at"] = now
+        job["rate_done"] = job["done"]
 
-def _phase(job, name, total=0):
-    """Reset phase accounting so WZML-X shows meaningful speed and ETA."""
+
+def _phase(job, name, *, total=None, reset=False):
     job["phase"] = name
-    job["done"] = 0
-    job["total"] = int(total or 0)
-    job["phase_start"] = monotonic()
+    if total is not None:
+        job["total"] = int(total)
+    if reset:
+        job["done"] = 0
+        job["bytes_per_second"] = 0.0
+        job["rate_at"] = monotonic()
+        job["rate_done"] = 0
 
 
-class HFNativeStatus:
-    """Provide the exact task protocol expected by WZML-X v3 /status and /cancel."""
+class HuggingFaceStatus:
+    """Expose HF jobs to the unmodified WZML-X v3 /status and /cancel APIs."""
 
-    def __init__(self, job, message, telegram_source):
+    def __init__(self, job, message, source):
         self.job = job
-        self.engine = "WzPyro HF-Hub"
         self.listener = SimpleNamespace(
             message=message,
-            user_id=job["user_id"],
-            name=job["filename"],
+            mid=message.id,
+            user_id=message.from_user.id,
             subname="",
             progress=True,
             is_super_chat=message.chat.type in (
-                ChatType.SUPERGROUP, ChatType.CHANNEL, ChatType.FORUM
+                ChatType.SUPERGROUP, ChatType.CHANNEL, ChatType.FORUM,
             ),
-            is_torrent=False,
             is_qbit=False,
+            is_torrent=False,
             is_nzb=False,
-            mode=("#Telegram" if telegram_source else "#HTTP", "#HuggingFace"),
+            mode=("#TgMedia" if source == "Telegram" else "#HTTP", "#HuggingFace"),
         )
+        self.engine = "WzPyro HF" if source == "Telegram" else "AioHttp HF"
+
+    def status(self):
+        if self.job["phase"] == "Queued":
+            return MirrorStatus.STATUS_QUEUEDL
+        if self.job["phase"] in ("Preparing HF upload", "Uploading to HF", "Committing to HF"):
+            return MirrorStatus.STATUS_UPLOAD
+        return MirrorStatus.STATUS_DOWNLOAD
 
     def name(self):
-        return self.job["filename"]
+        return self.job.get("filename") or "Hugging Face mirror"
 
     def gid(self):
         return self.job["id"]
 
-    def status(self):
-        stage = self.job.get("phase", "")
-        if stage.startswith("Downloading"):
-            return MirrorStatus.STATUS_DOWNLOAD
-        if stage == "Queued":
-            return MirrorStatus.STATUS_QUEUEDL
-        return MirrorStatus.STATUS_UPLOAD
+    def size(self):
+        return get_readable_file_size(self.job["total"])
 
     def processed_bytes(self):
-        return get_readable_file_size(self.job.get("done", 0))
+        return get_readable_file_size(self.job["done"])
 
-    def size(self):
-        total = self.job.get("total", 0)
-        return get_readable_file_size(total) if total else "Unknown"
+    def progress_raw(self):
+        total = max(0, self.job["total"])
+        return min(100.0, max(0.0, 100.0 * self.job["done"] / total)) if total else 0.0
 
     def progress(self):
-        done, total = self.job.get("done", 0), self.job.get("total", 0)
-        if not total:
-            return "0.00%"
-        return f"{min(100, max(0, done / total * 100)):.2f}%"
-
-    def _speed(self):
-        elapsed = max(0.001, monotonic() - self.job.get("phase_start", monotonic()))
-        return self.job.get("done", 0) / elapsed
+        return f"{self.progress_raw():.2f}%"
 
     def speed(self):
-        return f"{get_readable_file_size(self._speed())}/s"
+        if self.job["phase"] in ("Preparing HF upload", "Committing to HF", "Queued"):
+            return "-"
+        return f"{get_readable_file_size(self.job['bytes_per_second'])}/s"
 
     def eta(self):
-        done, total = self.job.get("done", 0), self.job.get("total", 0)
-        speed = self._speed()
-        if total <= 0 or speed <= 0:
+        speed = self.job["bytes_per_second"]
+        remaining = self.job["total"] - self.job["done"]
+        if speed <= 0 or remaining <= 0:
             return "-"
-        return get_readable_time((total - min(done, total)) / speed) or "0s"
+        return get_readable_time(remaining / speed) or "0s"
 
     def task(self):
         return self
 
     async def cancel_task(self):
-        current = self.job.get("task")
-        if current and not current.done():
-            current.cancel()
+        """Called by WZML-X's native /cancel handler or cancel-all menu."""
+        worker = self.job.get("task")
+        if worker and not worker.done():
+            worker.cancel()
 
 
-def _buttons(job):
-    buttons = ButtonMaker()
-    buttons.data_button(
-        "♻️ Refresh Status", f"hfu:refresh:{job['id']}",
-        style=ButtonStyle.PRIMARY,
-    )
-    buttons.data_button(
-        "✖ Cancel Transfer", f"hfu:cancel:{job['id']}",
-        style=ButtonStyle.DANGER,
-    )
-    return buttons.build_menu(2)
+async def _unregister(job):
+    """Remove only our entry; do not disturb other WZML-X tasks."""
+    JOBS.pop(job["id"], None)
+    async with task_dict_lock:
+        if task_dict.get(job["mid"]) is job.get("status_obj"):
+            task_dict.pop(job["mid"], None)
+        remaining = bool(task_dict)
+    if remaining:
+        await update_status_message(job["chat_id"], force=True)
+    else:
+        # Match TaskListener.clean() so the bot does not leave an orphan status page.
+        for tick in list(intervals["status"].values()):
+            tick.cancel()
+        intervals["status"].clear()
+        await delete_status()
 
 
-def _hook_hf_progress():
-    """Count bytes read for Hub LFS uploads, without serializing concurrent jobs.
+def _install_hf_progress_hook():
+    """Observe HF HTTP file reads while preserving SDK's default path for other calls.
 
-    WZML-X's regular /status remains usable even if an SDK transfer path does
-    not expose byte-level progress (e.g. Git-based small-file commits).
+    This is specific to the pinned huggingface_hub==0.36.0 API. Files are
+    keyed by absolute path, so concurrent HF jobs do not overwrite callbacks.
     """
-    global _PROGRESS_HOOK_INSTALLED
-    if _PROGRESS_HOOK_INSTALLED:
-        return
-    from huggingface_hub import _commit_api
+    global _HF_STREAM_PATCHED
+    with _HF_HOOK_LOCK:
+        if _HF_STREAM_PATCHED:
+            return
+        # The original HF uploader also disables Xet for instrumented HTTP uploads.
+        os.environ["HF_HUB_DISABLE_XET"] = "1"
+        os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+        from huggingface_hub import _commit_api, constants
+        constants.HF_HUB_DISABLE_XET = True
+        constants.HF_HUB_ENABLE_HF_TRANSFER = False
+        # On WZML plugin reload, unwrap our previous hook instead of nesting it.
+        original = getattr(_commit_api, "_wz_hf_original_stream_file", None)
+        if original is None:
+            original = getattr(_commit_api, "tqdm_stream_file", None)
+            if original is None:
+                return
+            _commit_api._wz_hf_original_stream_file = original
 
-    original = _commit_api.tqdm_stream_file
+        @contextmanager
+        def tracked(path):
+            report = _HF_PROGRESS.get(os.path.abspath(os.fspath(path)))
+            if report is None:
+                with original(path) as stream:
+                    yield stream
+                return
 
-    class MeteredFile(BufferedReader):
-        def __init__(self, path, job):
-            super().__init__(FileIO(path, "r"))
-            self.job = job
-            self.high_water = 0
+            class Progress(io.BufferedReader):
+                def __init__(self, raw):
+                    super().__init__(raw)
+                    self.last = 0.0
 
-        def read(self, size=-1):
-            block = super().read(size)
-            self.high_water = max(self.high_water, self.tell())
-            self.job["done"] = self.high_water
-            return block
+                def read(self, length=-1):
+                    result = super().read(length)
+                    now = monotonic()
+                    if result and (now - self.last >= 0.3 or self.tell() == self.raw_size):
+                        report(self.tell())
+                        self.last = now
+                    return result
 
-    @contextmanager
-    def monitor(path):
-        key = os.path.abspath(os.fspath(path))
-        job = _UPLOAD_FILES.get(key)
-        if job is None:
-            with original(path) as handle:
-                yield handle
-        else:
-            with MeteredFile(key, job) as handle:
-                yield handle
+            with Progress(io.FileIO(path, "r")) as stream:
+                stream.raw_size = os.path.getsize(path)
+                yield stream
+                report(stream.tell())
 
-    _commit_api.tqdm_stream_file = monitor
-    _PROGRESS_HOOK_INSTALLED = True
+        _commit_api.tqdm_stream_file = tracked
+        _HF_STREAM_PATCHED = True
+
+DEFAULT_GB = 1024**3
+SAFE_REPO = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$")
+FILE_MEDIA = ("document", "video", "audio", "animation", "voice", "video_note", "photo")
 
 
 def _settings():
@@ -319,14 +355,16 @@ async def _http_download(url, directory, override, job, cfg):
                 size = int(response.headers.get("Content-Length") or 0)
                 if size > max_bytes:
                     raise ValueError("Source file exceeds the configured max_file_gb limit")
-                _phase(job, "Downloading HTTP", size)
+                job["total"] = size
                 name = override or _content_filename(response.headers, str(response.url))
                 target = directory / name
                 job["filename"] = name
+                _phase(job, "Downloading HTTP", total=size)
                 _free_space(directory, cfg.get("min_free_mb", 512))
                 with target.open("wb") as out:
                     async for chunk in response.content.iter_chunked(1024 * 1024):
                         job["done"] += len(chunk)
+                        _rate(job)
                         if job["done"] > max_bytes:
                             raise ValueError("Downloaded file exceeds the configured limit")
                         if (job["done"] // (16 * 1024**2)) != ((job["done"] - len(chunk)) // (16 * 1024**2)):
@@ -343,12 +381,14 @@ async def _telegram_download(message, directory, override, job, cfg):
     limit = int(cfg.get("max_file_gb", 10)) * DEFAULT_GB
     if total > limit:
         raise ValueError("Telegram file exceeds max_file_gb")
-    _phase(job, "Downloading Telegram", total)
+    job["total"] = total
     job["filename"] = override or name
+    _phase(job, "Downloading Telegram", total=total)
     _free_space(directory, cfg.get("min_free_mb", 512))
 
     async def progress(current, expected):
         job["done"] = current
+        _rate(job)
         job["total"] = int(expected or total)
         if current > limit:
             raise ValueError("Telegram file exceeds max_file_gb")
@@ -370,12 +410,10 @@ async def _telegram_download(message, directory, override, job, cfg):
 
 
 def _hf_upload(file_path, filename, subfolder, cfg, token, repo, repo_type, branch, job):
-    """Blocking Hub SDK upload, with native /status byte tracking for LFS."""
-    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
-    from huggingface_hub import HfApi, constants
+    """Hugging Face SDK operations run in a worker; never block the bot loop."""
+    _install_hf_progress_hook()
+    from huggingface_hub import CommitOperationAdd, HfApi
 
-    constants.HF_HUB_DISABLE_XET = True
-    _hook_hf_progress()
     api = HfApi(token=token)
     api.create_repo(repo_id=repo, repo_type=repo_type, private=bool(cfg.get("private", True)), exist_ok=True)
     if branch != "main":
@@ -395,20 +433,31 @@ def _hf_upload(file_path, filename, subfolder, cfg, token, repo, repo_type, bran
                 break
         else:
             raise ValueError("Too many colliding filenames in the repository")
-    key = os.path.abspath(os.fspath(file_path))
-    _UPLOAD_FILES[key] = job
+
+    source = os.path.abspath(os.fspath(file_path))
+    size = os.path.getsize(source)
+
+    def report(done):
+        job["phase"] = "Uploading to HF"
+        job["done"] = min(size, max(job["done"], int(done)))
+        _rate(job)
+
+    operation = CommitOperationAdd(path_in_repo=remote, path_or_fileobj=source)
+    _HF_PROGRESS[source] = report
     try:
-        api.upload_file(
-            path_or_fileobj=str(file_path),
-            path_in_repo=remote,
-            repo_id=repo,
-            repo_type=repo_type,
-            revision=branch,
-            commit_message=f"Upload {remote} from WZML-X",
+        api.preupload_lfs_files(
+            repo_id=repo, additions=[operation], repo_type=repo_type,
+            revision=branch, num_threads=1,
         )
-        job["done"] = job["total"]
+        job["phase"] = "Committing to HF"
+        # Treat the commit as complete only after HF confirms it.
+        api.create_commit(
+            repo_id=repo, operations=[operation], repo_type=repo_type,
+            revision=branch, commit_message=f"Upload {remote} from WZML-X",
+        )
+        job["done"] = size
     finally:
-        _UPLOAD_FILES.pop(key, None)
+        _HF_PROGRESS.pop(source, None)
     return _hf_link(repo, repo_type, branch, remote), remote, False
 
 
@@ -417,113 +466,73 @@ def _hf_link(repo, repo_type, branch, remote):
     return f"https://huggingface.co/{prefix}{repo}/blob/{quote(branch, safe='')}/{quote(remote, safe='/')}"
 
 
-
 async def _run(job, message, url, override, subfolder, cfg):
-    job_id = job["id"]
+    upload_task = None
     try:
         token, repo, repo_type, branch = _destination(cfg)
         root = Path(DOWNLOAD_DIR)
         root.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="hf-plugin-", dir=root) as tmp:
             directory = Path(tmp)
-            if url.startswith((
-                "https://t.me/", "https://telegram.me/",
-                "https://telegram.dog/", "https://telegram.space/"
-            )):
+            if url.startswith(("https://t.me/", "https://telegram.me/", "https://telegram.dog/", "https://telegram.space/")):
                 from bot.helper.telegram_helper.message_utils import TgSource
                 messages, requested, *_ = await TgSource.resolve(url, limit=1)
                 if requested != 1 or not messages:
                     raise ValueError("Provide one Telegram message link or reply to a file")
-                path = await _telegram_download(
-                    messages[0], directory, override, job, cfg
-                )
+                path = await _telegram_download(messages[0], directory, override, job, cfg)
             elif url:
                 path = await _http_download(url, directory, override, job, cfg)
             else:
-                path = await _telegram_download(
-                    message.reply_to_message, directory, override, job, cfg
-                )
+                path = await _telegram_download(message.reply_to_message, directory, override, job, cfg)
+
             folder = subfolder if subfolder is not None else _folder(cfg.get("folder", ""))
-            _phase(job, "Uploading to HF", path.stat().st_size)
-            upload_task = asyncio.create_task(
-                asyncio.to_thread(
-                    _hf_upload, path, path.name, folder,
-                    cfg, token, repo, repo_type, branch, job
-                )
-            )
+            _phase(job, "Preparing HF upload", total=path.stat().st_size, reset=True)
+            job["status_obj"].engine = "HuggingFace Hub"
+            await update_status_message(job["chat_id"], force=True)
+            upload_task = asyncio.create_task(asyncio.to_thread(
+                _hf_upload, path, path.name, folder, cfg, token, repo, repo_type, branch, job,
+            ))
             try:
-                file_link, remote, skipped = await asyncio.shield(upload_task)
+                url_out, remote, skipped = await asyncio.shield(upload_task)
             except asyncio.CancelledError:
-                # The SDK's synchronous transfer can still be reading this file.
-                # Keep it on disk until the thread actually exits.
-                try:
-                    await upload_task
-                except Exception:
-                    pass
+                # The SDK's HTTP worker cannot safely be killed. Keep the file
+                # on disk until that worker stops reading it, even if cancelled.
+                while not upload_task.done():
+                    try:
+                        await asyncio.shield(upload_task)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
                 raise
-            job["phase"] = "Completed"
-            job["done"] = job.get("total", 0)
+            _phase(job, "Completed", total=path.stat().st_size)
+            label = "Already exists (skipped)" if skipped else "Uploaded"
             buttons = ButtonMaker()
-            buttons.url_button(
-                "🔗 Open HF File", file_link, style=ButtonStyle.PRIMARY
-            )
-            repo_prefix = "datasets/" if repo_type == "dataset" else ""
-            buttons.url_button(
-                "📁 Repository",
-                f"https://huggingface.co/{repo_prefix}{repo}",
-            )
-            state = "Already Exists (Skipped)" if skipped else "Upload Completed"
+            buttons.url_button("View on Hugging Face", url_out)
             await send_message(
                 message,
-                f"〶 <b><u>Hugging Face {state}</u></b>\n"
+                f"<b>〶 Hugging Face {label}</b>\n"
                 f"┃\n┠ <b>File</b> → <code>{escape(remote)}</code>\n"
-                f"┠ <b>Size</b> → {get_readable_file_size(path.stat().st_size)}\n"
                 f"┠ <b>Repository</b> → <code>{escape(repo)}</code>\n"
-                f"┠ <b>Branch</b> → <code>{escape(branch)}</code>\n"
-                f"┠ <b>Out Mode</b> → #HuggingFace\n"
-                f"┖ <b>Time</b> → {get_readable_time(time() - job['started']) or '0s'}",
-                buttons.build_menu(2),
+                f"┠ <b>Size</b> → {get_readable_file_size(path.stat().st_size)}\n"
+                f"┖ <b>Out Mode</b> → #HuggingFace",
+                buttons.build_menu(1),
             )
     except asyncio.CancelledError:
         job["phase"] = "Cancelled"
         try:
-            await send_message(
-                message,
-                f"〶 <b>Hugging Face Transfer Cancelled</b>\n"
-                f"┖ <b>Task</b> → <code>{job_id}</code>\n"
-                "<i>An in-flight HF commit may still finish remotely.</i>",
-            )
+            await send_message(message, "<b>〶 Hugging Face transfer cancelled.</b> An upload already in flight may still finish remotely.")
         except Exception:
-            pass
+            LOGGER.warning("Failed to send Hugging Face cancellation notice", exc_info=True)
     except Exception as error:
         job["phase"] = "Failed"
-        LOGGER.error(
-            "hf_uploader transfer %s failed: %s", job_id, error, exc_info=True
-        )
+        LOGGER.error("hf_uploader transfer %s failed: %s", job["id"], error, exc_info=True)
         try:
-            await send_message(
-                message,
-                f"〶 <b>Hugging Face Transfer Failed</b>\n"
-                f"┟ <b>Reason</b> → {escape(str(error)[:700])}\n"
-                f"┖ <b>Task</b> → <code>{job_id}</code>",
-            )
+            await send_message(message, f"<b>〶 Hugging Face transfer failed</b>\n┖ <b>Reason</b> → {escape(str(error)[:800])}")
         except Exception:
-            pass
+            LOGGER.warning("Failed to send Hugging Face failure notice", exc_info=True)
     finally:
-        JOBS.pop(job_id, None)
-        async with task_dict_lock:
-            if isinstance(task_dict.get(message.id), HFNativeStatus) and (
-                task_dict[message.id].job is job
-            ):
-                del task_dict[message.id]
-            count = len(task_dict)
-        try:
-            if count == 0:
-                await delete_status()
-            else:
-                await update_status_message(message.chat.id, force=True)
-        except Exception as error:
-            LOGGER.warning("Could not refresh WZML-X status after HF task: %s", error)
+        await _unregister(job)
 
 
 async def hfmirror_command(_, message):
@@ -531,100 +540,56 @@ async def hfmirror_command(_, message):
         url, override, subfolder = _request(message)
         cfg = dict(_settings())
         _destination(cfg)
-        if len(JOBS) >= int(cfg.get("max_jobs", 2)):
-            raise ValueError("All Hugging Face mirror slots are busy.")
+        if message.from_user is None:
+            raise ValueError("Run the command from your Telegram user account.")
+        source = "Telegram" if not url or url.startswith(("https://t.me/", "https://telegram.me/", "https://telegram.dog/", "https://telegram.space/")) else "HTTP"
         job_id = secrets.token_hex(8)
         job = {
             "id": job_id,
-            "user_id": (message.from_user or message.sender_chat).id,
+            "mid": message.id,
             "chat_id": message.chat.id,
             "phase": "Queued",
-            "phase_start": monotonic(),
-            "started": time(),
             "done": 0,
             "total": 0,
-            "filename": override or "Preparing...",
+            "filename": override or "Hugging Face mirror",
             "task": None,
+            "status_obj": None,
+            "bytes_per_second": 0.0,
+            "rate_at": monotonic(),
+            "rate_done": 0,
         }
-        via_telegram = not url or url.startswith((
-            "https://t.me/", "https://telegram.me/",
-            "https://telegram.dog/", "https://telegram.space/"
-        ))
-        native_status = HFNativeStatus(job, message, via_telegram)
+        obj = HuggingFaceStatus(job, message, source)
+        job["status_obj"] = obj
         async with task_dict_lock:
+            if len(JOBS) >= int(cfg.get("max_jobs", 2)):
+                raise ValueError("All Hugging Face mirror slots are busy. Check /status.")
             if message.id in task_dict:
-                raise ValueError("A task already exists for this command.")
-            task_dict[message.id] = native_status
-        JOBS[job_id] = job
-        job["task"] = asyncio.create_task(
-            _run(job, message, url, override, subfolder, cfg)
-        )
-        # WZML-X now owns this status message, its refresh button and timer.
+                raise ValueError("This message already has an active WZML-X task")
+            task_dict[message.id] = obj
+            JOBS[job_id] = job
+        job["task"] = asyncio.create_task(_run(job, message, url, override, subfolder, cfg))
+        # If cancelled before the coroutine even starts, its finally block cannot run.
+        def ensure_cleanup(done):
+            if JOBS.get(job["id"]) is job:
+                asyncio.create_task(_unregister(job))
+        job["task"].add_done_callback(ensure_cleanup)
+        # Use WZML-X's automatic status message, pagination and refresh controls.
+        # A single status message per chat is managed by core WZML-X.
         try:
             await send_status_message(message)
-        except Exception as error:
-            LOGGER.warning("Initial WZML-X status could not be sent: %s", error)
-        await send_message(
-            message,
-            f"〶 <b><u>Hugging Face Mirror Started</u></b>\n"
-            f"┃\n┟ <b>Engine</b> → WZML-X / HF Hub\n"
-            f"┠ <b>Task ID</b> → <code>{job_id}</code>\n"
-            f"┖ <b>Status</b> → Automatically updated in the WZML-X task panel",
-            _buttons(job),
-        )
+        except Exception:
+            LOGGER.warning("HF task started but WZML-X status page could not be sent", exc_info=True)
     except (ValueError, OSError) as error:
-        await send_message(message, f"<b>HF Mirror:</b> {escape(str(error))}")
-
-
-async def hfstatus_command(_, message):
-    """Optional shortcut to the SAME native WZML-X status, not a separate UI."""
-    if not JOBS:
-        return await send_message(message, "No active Hugging Face mirror tasks.")
-    await send_status_message(message)
-
-
-async def hfcancel_command(_, message):
-    args = (message.text or "").split(maxsplit=1)
-    job_id = args[1].strip() if len(args) > 1 else ""
-    job = JOBS.get(job_id)
-    if not job or job["user_id"] != (message.from_user or message.sender_chat).id:
-        return await send_message(message, "No active Hugging Face task with that ID.")
-    current = job.get("task")
-    if current and not current.done():
-        current.cancel()
-    await send_message(
-        message, f"Cancellation requested for <code>{escape(job_id)}</code>."
-    )
-
-
-async def hf_action_callback(_, query):
-    """Owner-only inline actions, matching WZML-X v3 button styles."""
-    try:
-        _, action, job_id = query.data.decode().split(":", 2)
-        job = JOBS.get(job_id)
-        if not job or query.from_user.id != job["user_id"]:
-            return await query.answer(
-                "This task has finished or is not yours.", show_alert=True
-            )
-        if action == "refresh":
-            await update_status_message(job["chat_id"], force=True)
-            return await query.answer("WZML-X status refreshed.")
-        if action == "cancel":
-            current = job.get("task")
-            if current and not current.done():
-                current.cancel()
-            return await query.answer("Cancellation requested.", show_alert=True)
-        return await query.answer("Unknown action.", show_alert=True)
-    except Exception as error:
-        LOGGER.warning("HF action callback failed: %s", error)
-        await query.answer("Unable to perform this action.", show_alert=True)
+        await send_message(message, f"<b>Usage/error:</b> {escape(str(error))}")
 
 
 class HuggingFacePlugin(PluginBase):
     async def on_unload(self):
-        for job in list(JOBS.values()):
-            if job.get("task"):
-                job["task"].cancel()
+        pending = [job["task"] for job in JOBS.values() if job.get("task") and not job["task"].done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         return True
 
     async def on_disable(self):
