@@ -14,15 +14,6 @@ commands:
     usage: /hfmirror [URL] [-n filename] [-p subfolder]; or reply to media with /hfmirror
     aliases: [hfm]
     access: owner
-  - name: hfstatus
-    handler: hfstatus_command
-    description: Optional shortcut to the built-in WZML-X live status
-    access: owner
-  - name: hfcancel
-    handler: hfcancel_command
-    description: Best-effort cancellation; also use WZML-X /cancel or inline Cancel button
-    usage: /hfcancel TASK_ID
-    access: owner
 callbacks:
   - pattern: "^hfu:"
     handler: hf_action_callback
