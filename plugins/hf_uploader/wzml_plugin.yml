@@ -1,9 +1,9 @@
 name: hf_uploader
-version: "1.0.0"
+version: "1.1.0"
 author: WikioApps
 repository: https://github.com/WikioApps/hf
 entry: hf_uploader.py
-description: Mirror Telegram files and direct HTTP(S) links to a Hugging Face model or dataset repository without a second bot.
+description: Native WZML-X v3 Hugging Face mirror with automatic status refresh, task controls and upload links.
 tags: [huggingface, mirror, upload, storage]
 python_dependencies:
   - huggingface_hub==0.36.0
@@ -16,12 +16,17 @@ commands:
     access: owner
   - name: hfstatus
     handler: hfstatus_command
-    description: Show active Hugging Face mirror jobs
+    description: Optional shortcut to the built-in WZML-X live status
     access: owner
   - name: hfcancel
     handler: hfcancel_command
-    description: Best-effort cancel an HF mirror job
+    description: Best-effort cancellation; also use WZML-X /cancel or inline Cancel button
     usage: /hfcancel TASK_ID
+    access: owner
+callbacks:
+  - pattern: "^hfu:"
+    handler: hf_action_callback
+    description: HF mirror task controls
     access: owner
 config_schema:
   repo_id:
