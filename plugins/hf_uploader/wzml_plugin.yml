@@ -1,66 +1,52 @@
 name: hf_uploader
-version: "1.1.0"
+version: "3.0.0"
 author: WikioApps
-repository: https://github.com/WikioApps/hf
 entry: hf_uploader.py
-description: Native WZML-X v3 Hugging Face mirror with automatic status refresh, task controls and upload links.
-tags: [huggingface, mirror, upload, storage]
+repository: https://github.com/WikioApps/hf
+min_bot_version: "3.1.9"
+description: Native WZML-X download/ZIP/7Z and Hugging Face mirror uploads, with persistent Telegram file-explorer pagination
+tags: [huggingface, mirror, dataset, archive, wzm3]
 python_dependencies:
   - huggingface_hub==0.36.0
 commands:
   - name: hfmirror
     handler: hfmirror_command
-    description: Mirror a direct URL or replied Telegram file to Hugging Face
-    usage: /hfmirror [URL] [-n filename] [-p subfolder]; or reply to media with /hfmirror
     aliases: [hfm]
     access: owner
+    description: Mirror via native WZML engines to Hugging Face
+    usage: /hfmirror LINK [-e [PASSWORD]] [-z [PASSWORD]] [-s] [-j] [-up FOLDER]
 callbacks:
-  - pattern: "^hfu:"
-    handler: hf_action_callback
-    description: HF mirror task controls
+  - pattern: "^hfpg [0-9]+ [0-9]+$"
+    handler: hfpage_callback
     access: owner
+    description: Browse Hugging Face remote files without database records
 config_schema:
   repo_id:
     type: string
     default: ""
-    description: Hugging Face repository, such as myusername/mydataset; or use HF_REPO_ID env
+    description: Hugging Face username/repository, or set HF_REPO_ID in host env
   repo_type:
     type: string
     default: dataset
     choices: [model, dataset]
-    description: Destination repository kind
   branch:
     type: string
     default: main
-    description: Branch to create/use
   folder:
     type: string
     default: ""
-    description: Default subfolder within repository
+    description: Default destination folder on HF
   private:
     type: boolean
     default: true
-    description: Make newly created repositories private (existing repos are unchanged)
+    description: Only used when creating a new repository
   collision:
     type: string
     default: rename
     choices: [rename, overwrite, skip]
-    description: When a remote file already exists
-  max_file_gb:
+  max_files:
     type: integer
-    default: 10
+    default: 5000
     min: 1
-    max: 100
-    description: Maximum downloaded file size in GiB
-  min_free_mb:
-    type: integer
-    default: 512
-    min: 128
-    max: 8192
-    description: Keep this much disk free while downloading
-  max_jobs:
-    type: integer
-    default: 2
-    min: 1
-    max: 8
-    description: Maximum concurrent HF mirror jobs
+    max: 100000
+    description: Limit extracted files per task; directory listing has Prev/Next pages
