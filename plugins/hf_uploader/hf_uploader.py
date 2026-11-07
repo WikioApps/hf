@@ -9,7 +9,6 @@ import asyncio
 from contextlib import contextmanager, suppress
 from html import escape
 import io
-import logging
 from os import environ, path as ospath, walk
 from pathlib import Path, PurePosixPath
 from re import compile as re_compile, sub as re_sub
@@ -127,7 +126,11 @@ def _reader_hook():
         if _HF_HOOKED:
             return
         try:
-            from huggingface_hub import _commit_api
+            from huggingface_hub import _commit_api, constants
+            # A live update from v3.0.0 may have globally forced Xet off.
+            # Restore the host-selected setting without requiring a restart.
+            disabled = environ.get("HF_HUB_DISABLE_XET", "").strip().upper()
+            constants.HF_HUB_DISABLE_XET = disabled in ("1", "ON", "YES", "TRUE")
         except (ImportError, AttributeError):
             return
         original = getattr(_commit_api, "_wzmlx_hf_original_tqdm_stream", None)
