@@ -1,5 +1,12 @@
 # Hugging Face Mirror — WZML-X v3 native plugin
 
+## v3.0.2 — Fix for Hugging Face upload NameError
+
+- Import `os` for the `tqdm_stream_file` progress wrapper (fixes `NameError: name 'os' is not defined` during LFS pre-upload).
+- Treat `NameError`, `AttributeError`, and `TypeError` as programming errors, rather than retrying them four times.
+- Do not retry an upload merely because the Hugging Face SDK says `Error while uploading`; a transient root cause must be present.
+- Existing configured HF folder flattening, archive handling, WZML-X `/status` integration, and restart-safe file browser are unchanged.
+
 This branch ports the destination uploader of [WikioApps/hf](https://github.com/WikioApps/hf) to WZML-X's native `Mirror` pipeline. It runs **inside the WZML-X v3 process**. Do not run `WikioApps/hf/app.py`, start a second bot, or expose a new HTTP port.
 
 ## Changes in v3.0.1
