@@ -9,6 +9,7 @@ import asyncio
 from contextlib import contextmanager, suppress
 from html import escape
 import io
+import os
 from os import environ, path as ospath, walk
 from pathlib import Path, PurePosixPath
 from re import compile as re_compile, sub as re_sub
@@ -213,6 +214,8 @@ def _reason(error):
 
 def _retryable(error):
     causes = list(_exception_chain(error))
+    if any(isinstance(cause, (NameError, AttributeError, TypeError)) for cause in causes):
+        return False
     for cause in causes:
         code = getattr(getattr(cause, "response", None), "status_code", None)
         if code is not None:
@@ -229,7 +232,7 @@ def _retryable(error):
     return any(word in combined for word in (
         "timed out", "timeout", "connection reset", "connection aborted",
         "remote disconnected", "broken pipe", "temporarily unavailable",
-        "service unavailable", "connection closed", "error while uploading",
+        "service unavailable", "connection closed",
     ))
 
 
