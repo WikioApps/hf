@@ -1,0 +1,70 @@
+name: hf_uploader
+version: "1.0.0"
+author: WikioApps
+repository: https://github.com/WikioApps/hf
+entry: hf_uploader.py
+description: Mirror Telegram files and direct HTTP(S) links to a Hugging Face model or dataset repository without a second bot.
+tags: [huggingface, mirror, upload, storage]
+python_dependencies:
+  - huggingface_hub==0.36.0
+commands:
+  - name: hfmirror
+    handler: hfmirror_command
+    description: Mirror a direct URL or replied Telegram file to Hugging Face
+    usage: /hfmirror [URL] [-n filename] [-p subfolder]; or reply to media with /hfmirror
+    aliases: [hfm]
+    access: owner
+  - name: hfstatus
+    handler: hfstatus_command
+    description: Show active Hugging Face mirror jobs
+    access: owner
+  - name: hfcancel
+    handler: hfcancel_command
+    description: Best-effort cancel an HF mirror job
+    usage: /hfcancel TASK_ID
+    access: owner
+config_schema:
+  repo_id:
+    type: string
+    default: ""
+    description: Hugging Face repository, such as myusername/mydataset; or use HF_REPO_ID env
+  repo_type:
+    type: string
+    default: dataset
+    choices: [model, dataset]
+    description: Destination repository kind
+  branch:
+    type: string
+    default: main
+    description: Branch to create/use
+  folder:
+    type: string
+    default: ""
+    description: Default subfolder within repository
+  private:
+    type: boolean
+    default: true
+    description: Make newly created repositories private (existing repos are unchanged)
+  collision:
+    type: string
+    default: rename
+    choices: [rename, overwrite, skip]
+    description: When a remote file already exists
+  max_file_gb:
+    type: integer
+    default: 10
+    min: 1
+    max: 100
+    description: Maximum downloaded file size in GiB
+  min_free_mb:
+    type: integer
+    default: 512
+    min: 128
+    max: 8192
+    description: Keep this much disk free while downloading
+  max_jobs:
+    type: integer
+    default: 2
+    min: 1
+    max: 8
+    description: Maximum concurrent HF mirror jobs
