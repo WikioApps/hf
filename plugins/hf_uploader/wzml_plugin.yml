@@ -1,10 +1,10 @@
 name: hf_uploader
-version: "3.0.0"
+version: "3.0.1"
 author: WikioApps
 entry: hf_uploader.py
 repository: https://github.com/WikioApps/hf
 min_bot_version: "3.1.9"
-description: Native WZML-X download/ZIP/7Z and Hugging Face mirror uploads, with persistent Telegram file-explorer pagination
+description: Native WZML-X downloads/archives and flat HF destination uploads with retry-aware progress and Telegram file browsing
 tags: [huggingface, mirror, dataset, archive, wzm3]
 python_dependencies:
   - huggingface_hub==0.36.0
@@ -35,7 +35,7 @@ config_schema:
   folder:
     type: string
     default: ""
-    description: Default destination folder on HF
+    description: Exact HF destination folder; no archive/download directories are appended. HF_FOLDER env overrides.
   private:
     type: boolean
     default: true
