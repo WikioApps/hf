@@ -1,0 +1,25 @@
+name: Validate WZML-X Hugging Face plugin
+
+on:
+  push:
+    branches: [wzmlx-plugin]
+    paths:
+      - "plugins/hf_uploader/**"
+      - "tests/test_wzmlx_hf_plugin.py"
+      - ".github/workflows/wzmlx-hf-plugin-check.yml"
+  workflow_dispatch:
+
+jobs:
+  plugin-tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check Python syntax and native status integration
+        run: python -m unittest discover -s tests -p "test_wzmlx_hf_plugin.py" -v
