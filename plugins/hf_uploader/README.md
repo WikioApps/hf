@@ -1,39 +1,56 @@
-# HF Uploader for WZML-X
+# Hugging Face Mirror for WZML-X v3
 
-A native WZML-X plugin port of the repository uploader from [WikioApps/hf](https://github.com/WikioApps/hf). It runs in the **same** WZML-X Python process. **Do not run the original `app.py` or `start.sh` in WZML-X.**
+Native v3-styled Hugging Face mirror plugin. Runs inside the original WZML-X process; the separate `WikioApps/hf` Telegram bot, web server and MongoDB task manager do **not** start.
 
-## Install from Telegram
+## Install or upgrade
 
-1. In the running WZML-X bot, open `/plugins` → **Install** → **GitHub**.
-2. Enter `WikioApps/hf@wzmlx-plugin` (or `https://github.com/WikioApps/hf/tree/wzmlx-plugin` if supported).
-3. Select **hf_uploader** and approve the `huggingface_hub==0.36.0` dependency if prompted.
-4. Add `HF_TOKEN=hf_...` as a **private environment variable** in the WZML-X hosting dashboard, then restart the WZML-X container (a host restart is necessary for a newly added environment secret).
-5. Open `/plugins` → **Installed** → **hf_uploader** → **Settings**, set `repo_id` to `YOUR_HF_USERNAME/YOUR_REPO_NAME`, choose `repo_type` (`dataset` or `model`), and optionally branch, folder, privacy and collision policy. You can alternatively set `HF_REPO_ID` in your host environment.
-6. Test by replying to a Telegram document or video with `/hfmirror`; or send `/hfmirror https://example.com/file.zip`.
+1. On WZML-X branch `wzv3`, send `/plugins` → **Install → GitHub**.
+2. Enter `WikioApps/hf@wzmlx-plugin` and select **hf_uploader**. If already installed, use **Installed → hf_uploader → Update** to fetch v1.1.0; **Reload** alone does not download new code.
+3. Approve the `huggingface_hub==0.36.0` dependency if prompted.
+4. Configure `HF_TOKEN=hf_...` in the WZML-X **hosting environment**, not Telegram chat; restart the container so the environment change applies.
+5. In `/plugins` → **Installed → hf_uploader → Settings**, enter `repo_id` (`username/repo`), `repo_type`, `branch`, `folder`, `private`, and filename collision behavior. Alternatively define `HF_REPO_ID` as a hosting secret.
+6. Test by replying to a small Telegram document with `/hfmirror` or sending `/hfmirror https://example.com/file.zip`.
 
-The Hugging Face access token should have write permissions on the target repo. For organizations, it must have the appropriate organization permissions as well. Do not paste it into public Telegram chats or the plugin Settings field; `HF_TOKEN` is intentionally read only from the host's environment.
+The HF token must have write permission on the target repo. A private repo requires permission for anyone opening its file links.
+
+## Same WZML-X v3 task UI
+
+- **Automatic native status:** running `/hfmirror` immediately registers a WZML-X task and sends the existing **v3 /status panel** without requiring another command.
+- **Auto refresh:** WZML-X's standard `STATUS_UPDATE_INTERVAL` controls updates, with the native **Refresh**, **TStats**, pagination and status-filter buttons. Configure `STATUS_UPDATE_INTERVAL` under `/bsettings` if you want more frequent refreshes.
+- **Task line:** file name, percentage, processed/total, speed, ETA, engine, input/output modes and native `/cancel_<GID>` shortcut appear through the standard task renderer.
+- **Buttons:** an additional, compact WZML-styled start message has **Refresh Status** and **Cancel Transfer** buttons. The native task panel remains owned by WZML-X rather than reimplemented in this plugin.
+- **Unified cancel:** the existing built-in `/cancel` works by **replying to the original /hfmirror command** or by `/cancel_<GID>` from the status panel. The button and legacy `/hfcancel TASK_ID` work too.
+- **Results:** on completion the bot sends a WZML-styled summary with **Open HF File** and **Repository** buttons. Errors and cancellations use native-style notifications.
+- **Progress:** HTTP and Telegram downloads report real downloaded bytes. Hugging Face upload attempts byte-level LFS tracking using the v0.36.0 internal streaming helper. Small Git-backed commits or alternate Hub paths may show **Upload** with indeterminate/zero progress until the commit completes. The integration does not claim that hashing bytes are uploaded bytes.
 
 ## Commands
 
-- `/hfmirror URL` or `/hfm URL`: download one HTTP(S) file and upload it to the configured Hugging Face repo.
-- `/hfmirror` as a **reply to a file**: download that Telegram file and upload to HF.
-- `/hfmirror https://t.me/publicchannel/123` (or an accessible private channel message link): upload the linked Telegram file.
-- `/hfmirror URL -n "custom name.mp4" -p "movies/season1"`: rename or set a per-task HF subfolder.
-- `/hfstatus`: see active tasks (Telegram/HTTP download progress and HF upload phase).
-- `/hfcancel TASK_ID`: best-effort cancellation. The Hugging Face SDK may finish an already-started remote upload.
+```text
+/hfmirror https://example.com/video.mp4
+/hfmirror https://example.com/video.mp4 -n "movie.mp4" -p "movies/2026"
+/hfmirror             # reply to a Telegram video/document
+/hfmirror https://t.me/publicchannel/123
+/status               # optional: native WZML-X status, automatically shown
+/hfstatus             # optional shortcut to that same native status
+/hfcancel TASK_ID      # legacy fallback, native /cancel is preferred
+```
 
-All commands are **owner-only**, because the uploader uses a single owner's HF token.
+Commands are **owner-only** by default because the plugin reads one host-level `HF_TOKEN`.
 
-## What it does / does not do
+## Existing boundaries
 
-**Included:** native WZML-X plugin loading, direct HTTP(S) downloads, Telegram media replies and supported message links, per-file size / free-space checks, Hugging Face model & dataset repos, branch creation, private new repos, subfolders, rename/overwrite/skip collision handling, task status, basic cancellation, and local temporary-file cleanup.
+Supports direct public HTTP(S) files, Telegram file replies, permitted Telegram message links, model/dataset repos, branch creation, HF subfolders and collision policies, basic size/disk safeguards, task cancellation, and local cleanup.
 
-**Not included yet:** generic `/mirror -hf` (that requires a WZML-X core upload-destination hook), torrent/magnet downloading, automatic file-host/playlist resolution, archive extraction or selection, per-user token management, integration with WZML-X's built-in `/status`, persistent retry/history, or the separate `hf` repository web dashboard. These features cannot be obtained by directly importing the old Telethon bot, and should be ported individually if needed.
+Not yet included: `/mirror -hf` (would require WZML-X core upload router modifications), torrent/magnet downloads, general filehost or yt-dlp extraction, archive selection/extraction, per-user tokens, persistent retry/history and the original separate HF web dashboard.
 
-HF file storage is subject to Hub quotas, content policies and repository versioning; this is not an unlimited generic CDN or Google Drive replacement. Private HF links only work for authorized viewers.
+Cancelling an already-started synchronous HF commit is **best-effort**: local files are retained until the worker stops, and the remote commit may still finish.
 
-## Runtime
+Hub accounts and repositories remain subject to [Hugging Face terms and storage policies](https://huggingface.co/docs/hub/storage-limits). HF is not an unlimited replacement for generic file storage.
 
-No extra container or port is needed. The plugin uses the WZML-X `aiohttp` and Pyrogram installation and adds `huggingface_hub==0.36.0`. Temporary files live under WZML-X's `DOWNLOAD_DIR` and are removed after completion/failure. Ensure the hosting service has enough free temporary disk for each downloaded file, plus headroom.
+## Technical details
 
-WZML-X native plugin instructions: https://github.com/SilentDemonSD/WZML-X/blob/wzv3/plugins/README.md
+- Tasks register in WZML-X's `task_dict` and implement the exact `MirrorStatus`/status-widget protocol; removal refreshes/cleans the stock status panel.
+- Native inline buttons are declared as owner-only callbacks in `wzml_plugin.yml`.
+- Downloaded files are staged under WZML-X's `DOWNLOAD_DIR`, and their temporary folder is removed on success/failure.
+- The plugin does not create a second HTTP port, app process, Telegram client or MongoDB collection.
+- WZML-X native plugin format: https://github.com/SilentDemonSD/WZML-X/blob/wzv3/plugins/README.md
